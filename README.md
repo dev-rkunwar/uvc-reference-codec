@@ -18,7 +18,9 @@ See [`UVC_Specification.md`](./UVC_Specification.md) for the full design
 | Build (CMake + C11, MinGW / gcc / clang) | ✅ |
 | Self-test (`uvctest`) — all subsystems | ✅ PASS (0 failures) |
 | **P1 block-transform pipeline (DCT+quant+entropy round-trip)** | ✅ |
-| **Container (ISOBMFF-style mux/demux of P1 frames)** | ✅ |
+| **P2 integer wavelet pipeline (DWT+quant+entropy round-trip)** | ✅ |
+| **P3 (INR) coord-hash scaffold pipeline** | ✅ |
+| **Container (ISOBMFF-style mux/demux of P1/P2/P3 frames + `uvsh` signaling)** | ✅ |
 | **Segment signaling header + selector→pipeline wiring (spec §9/§10/§1)** | ✅ |
 | CI (GitHub Actions, Windows + Linux) | ✅ see `.github/workflows/ci.yml` |
 
@@ -84,6 +86,14 @@ UVC_Specification.md   Full design specification
   P1. Bit-exact reconstruction when the signal fits the quantizer (verified by
   `test_p2_pipeline`). The container labels each frame's paradigm in the `uvcm`
   box (1 = P1, 2 = P2).
+- P3 INR scaffold — a **multi-resolution coordinate-hash permutation**
+  (MLHB-style) (`common/p3.c`). The pixel grid is permuted by a deterministic,
+  content-adaptive hash seeded from a frame checksum (so the mapping is
+  frame-specific, like an INR network), then INT8-quantized and rANS-coded
+  exactly like P1/P2. The permutation is a true bijection reconstructed from a
+  4-byte seed header, so decode is bit-exact and inverts the mapping without
+  shipping it. Tier-2; lossless at scale 1.0 (verified by `test_p3_pipeline`
+  and `test_p3_segment`). Container paradigm id 3.
 - Quantizer — INT8 / INT4 scalar quantization with round-trip + clamping.
 - Bitstream — bit-exact `bw_put` / `br_get` writer/reader (64-bit accumulator,
   multi-byte safe).
@@ -98,18 +108,19 @@ UVC_Specification.md   Full design specification
   chosen codec (P2 wavelet or P1 base) and writes a `uvsh` signaling header box
   (paradigm set + tier) into the container; `uvc_decode_segment()` demuxes,
   reads the `uvsh` header, runs `uvc_negotiate_layers()` against the decoder's
-  tier/model config, and routes each frame to the matching pipeline. Frames the
-  decoder cannot satisfy are REFUSED (per spec §7.3/§1 base-layer fallback)
-  rather than silently mis-decoded. P3/P4 are signaled and negotiate correctly
-  but cannot be decoded in this Tier-1 integer scaffold (no neural runtime).
+  tier/model config, and routes each frame to the matching pipeline (P1 base,
+  P2 wavelet, or P3 coord-hash). Frames the decoder cannot satisfy are REFUSED
+  (per spec §7.3/§1 base-layer fallback) rather than silently mis-decoded.
+  P4 is signaled and negotiates correctly but cannot be decoded in this Tier-1
+  integer scaffold (no neural runtime).
 - **Container** (`common/container.c`) — ISOBMFF-style box mux/demux (`ftyp` /
   `moov` + `mvhd` + `uvcm` / `mdat`) wrapping P1 frame bitstreams in one file;
   big-endian, integer-only, bit-exact round-trip (verified by `test_container`).
 
 **Stubs (not yet implemented):**
-- P3 (INR) and P4 (semantic token) encode/decode pipelines.
+- P4 (semantic token) encode/decode pipeline.
 - Neural model inference.
-- P2 is implemented as an integer wavelet pipeline; remaining work is the P3/P4 neural paradigms.
+- P4 is signaled and negotiates correctly but has no decode pipeline in this Tier-1 integer scaffold.
 
 ## Determinism
 

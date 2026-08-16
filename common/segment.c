@@ -6,6 +6,7 @@
 
 #include "p1.h"
 #include "p2.h"
+#include "p3.h"
 
 /* Required decode tier per paradigm flag (1..4 -> P1..P4). Mirrors the
  * negotiate.c convention that P1 is tier-1 and the neural paradigms are
@@ -54,7 +55,12 @@ int uvc_plan_segment(const uvc_content_profile_t *prof,
 int uvc_encode_segment(const int16_t *const *frames, int nframes, int w, int h,
                        const uvc_segment_config_t *cfg, uint8_t *out, int cap) {
     if (nframes < 0 || w <= 0 || h <= 0 || !cfg) return -1;
+    /* Base layer is always P1. Enhancement frames use the highest-priority
+     * neural paradigm present in the plan set (P4 > P3 > P2), matching the
+     * spec GOP model (one base P1 picture + enhancement pictures). */
     int use_p2 = (cfg->paradigm_set & UVC_P2_NEURAL) ? 1 : 0;
+    int use_p3 = (cfg->paradigm_set & UVC_P3_INR)    ? 1 : 0;
+    int enh = use_p3 ? 3 : (use_p2 ? 2 : 0);   /* 0 = none, 2 = P2, 3 = P3 */
 
     /* Encode each frame with its paradigm's pipeline into a scratch buffer. */
     const uint8_t **ptrs = malloc((size_t)nframes * sizeof(*ptrs));
@@ -70,14 +76,25 @@ int uvc_encode_segment(const int16_t *const *frames, int nframes, int w, int h,
         bufs[f] = malloc((size_t)w * h * 2);
         if (!bufs[f]) goto cleanup;
         int n;
-        if (use_p2)
-            n = uvc_p2_encode_frame(frames[f], w, h, cfg->p2_level, cfg->scale_fp, bufs[f], (int)(w * h * 2));
-        else
+        uint8_t pid;
+        if (f == 0) {
+            /* Base picture is always P1 (decodable standalone on Tier-1). */
             n = uvc_p1_encode_frame(frames[f], w, h, cfg->scale_fp, bufs[f], (int)(w * h * 2));
+            pid = UVC_PARADIGM_P1;
+        } else if (enh == 3) {
+            n = uvc_p3_encode_frame(frames[f], w, h, cfg->scale_fp, bufs[f], (int)(w * h * 2));
+            pid = UVC_PARADIGM_P3;
+        } else if (enh == 2) {
+            n = uvc_p2_encode_frame(frames[f], w, h, cfg->p2_level, cfg->scale_fp, bufs[f], (int)(w * h * 2));
+            pid = UVC_PARADIGM_P2;
+        } else {
+            n = uvc_p1_encode_frame(frames[f], w, h, cfg->scale_fp, bufs[f], (int)(w * h * 2));
+            pid = UVC_PARADIGM_P1;
+        }
         if (n <= 0) goto cleanup;
         flen[f] = n;
         ptrs[f] = bufs[f];
-        par[f] = use_p2 ? UVC_PARADIGM_P2 : UVC_PARADIGM_P1;
+        par[f] = pid;
     }
 
     rc = uvc_mux_ex(ptrs, flen, nframes, w, h, par, cfg->paradigm_set, cfg->tier, out, cap);
@@ -128,6 +145,7 @@ int uvc_decode_segment(const uint8_t *buf, size_t len, int w, int h,
     for (int f = 0; f < dn; f++) {
         uint8_t pid = dpar[f];
         int use_p2 = 0;
+        int use_p3 = 0;
         uint8_t decoded_pid = pid;
 
         if (pid == UVC_PARADIGM_P1) {
@@ -136,13 +154,18 @@ int uvc_decode_segment(const uint8_t *buf, size_t len, int w, int h,
         } else if (pid == UVC_PARADIGM_P2) {
             if (!(allowed & UVC_P2_NEURAL)) return -1;   /* tier<2: cannot decode */
             use_p2 = 1;
+        } else if (pid == UVC_PARADIGM_P3) {
+            if (!(allowed & UVC_P3_INR)) return -1;      /* tier<2: cannot decode */
+            use_p3 = 1;
         } else {
-            /* P3/P4: no neural pipeline in the Tier-1 scaffold. */
+            /* P4: no neural pipeline in the Tier-1 scaffold. */
             return -1;
         }
 
         int rc;
-        if (use_p2)
+        if (use_p3)
+            rc = uvc_p3_decode_frame(dframes[f], dlens[f], w, h, 32768, rec[f]);
+        else if (use_p2)
             rc = uvc_p2_decode_frame(dframes[f], dlens[f], w, h, 3, 32768, rec[f]);
         else
             rc = uvc_p1_decode_frame(dframes[f], dlens[f], w, h, 32768, rec[f]);
