@@ -56,7 +56,8 @@ static void write_pgm(const char *path, const int16_t *frame, int w, int h) {
     fprintf(f, "P5\n%d %d\n255\n", w, h);
     for (int i = 0; i < w * h; i++) {
         int v = (int)((frame[i] - minv) * 255L / span);
-        if (v < 0) v = 0; if (v > 255) v = 255;
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
         fputc(v, f);
     }
     fclose(f);
