@@ -743,7 +743,7 @@ container are intentionally stubbed pending the roadmap in issue #1.
 | **P1 pipeline** (`encoder/p1.*`, `decoder/p1.*`) | **Implemented (round-trip)** | Integer 8×8 DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy (nibble alphabet) → IDCT. Self-test proves bit-exact reconstruction when the signal fits int8. |
 | Tier negotiation (`decoder/negotiate.*`) | Implemented | Stub tier map (LEGACY/ENHANCED/FULL). |
 | **Container** (`common/container.*`) | **Implemented (round-trip)** | ISOBMFF-style box mux/demux (`ftyp`/`moov`+`mvhd`+`uvcm`/`mdat`) wrapping P1 frame bitstreams; big-endian boxes, integer-only. |
-| P2 / P3 / P4 | Stub | Roadmap issue #1. |
+| P2 / P3 / P4 | **P2 implemented (integer DWT scaffold)**; P3 / P4 Stub | P2 = integer LeGall-5/3 wavelet pipeline (DWT + INT8 quant + rANS); verified round-trip + lossless adjoint. P3 (INR) / P4 (semantic) remain stubs (roadmap issue #1). |
 
 Self-tests (`tools/uvctest.c`) cover rANS round-trip + determinism, quant
 round-trip, bitstream round-trip, analyzer+selector, tier negotiation, the
