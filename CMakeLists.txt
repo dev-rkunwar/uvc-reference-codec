@@ -36,3 +36,17 @@ target_include_directories(uvctest PRIVATE
 
 enable_testing()
 add_test(NAME uvctest COMMAND uvctest)
+
+# ---- Optional playback-loop demo (tools/uvcplay_demo.c) ----
+# A minimal, self-contained "player" loop over the public API. Built by default
+# so CI also verifies it compiles + links against the libraries. Link statically
+# on MinGW for a self-contained binary (matching uvctest).
+add_executable(uvcplay_demo tools/uvcplay_demo.c)
+if(MINGW)
+    target_link_options(uvcplay_demo PRIVATE -static)
+endif()
+target_link_libraries(uvcplay_demo uvc_common uvc_enc uvc_dec)
+target_include_directories(uvcplay_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/encoder
+    ${CMAKE_CURRENT_SOURCE_DIR}/decoder)
