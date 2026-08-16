@@ -23,8 +23,11 @@ target_link_libraries(uvc_dec uvc_common)
 
 # ---- Self-test / conformance binary ----
 add_executable(uvctest tools/uvctest.c)
-# Link statically so the binary is self-contained (no MinGW runtime DLL dependency).
-target_link_options(uvctest PRIVATE -static)
+# Link statically on MinGW so the binary is self-contained (no MinGW runtime DLL dependency).
+# On other toolchains (e.g. Linux gcc) we keep the default link so CI stays portable.
+if(MINGW)
+    target_link_options(uvctest PRIVATE -static)
+endif()
 target_link_libraries(uvctest uvc_common uvc_enc uvc_dec)
 target_include_directories(uvctest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/common

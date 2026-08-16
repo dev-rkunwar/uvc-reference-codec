@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: windows-latest
+            cc: mingw
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MinGW (Windows)
+        if: matrix.cc == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Install Ninja (Linux)
+        if: matrix.cc != 'mingw'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (Windows / MinGW)
+        if: matrix.cc == 'mingw'
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=gcc
+
+      - name: Configure (Linux)
+        if: matrix.cc != 'mingw'
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }}
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Test (direct run, Windows)
+        if: matrix.cc == 'mingw'
+        shell: msys2 {0}
+        run: ./build/uvctest.exe
