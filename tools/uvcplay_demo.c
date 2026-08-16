@@ -6,19 +6,18 @@
  *
  *   source luma (uint8) -> analyze -> select paradigm
  *                  -> encode frame -> mux into container buffer
- *   ... (persist buffer to disk as the integrator's responsibility) ...
- *   demux buffer -> per-frame: decode (P1 or P2) -> render (here: write PGM)
+ *   ... persist buffer to disk as movie.uvc (real file I/O) ...
+ *   reload from disk -> demux -> per-frame: decode (P1 or P2) -> render (PGM)
  *
- * Build (after `cmake --build build`):
- *   gcc tools/uvcplay_demo.c -Icommon -Iencoder -Idecoder \
- *       build/libuvc_common.a build/libuvc_enc.a build/libuvc_dec.a \
- *       -o build/uvcplay_demo
+ * Build (after `cmake --build build`): the demo is a CMake target `uvcplay_demo`.
  * Run:
  *   ./build/uvcplay_demo
  *
  * It encodes two synthetic clips (a flat "screen" clip and a textured
- * "natural" clip), each muxed as P1 or P2 frames, writes the container to
- * movie.uvc, then decodes it back and emits one PGM per frame.
+ * "natural" clip), each muxed as P1 or P2 frames, persists the container to
+ * movie.uvc, reloads it from disk, then decodes it back and emits one PGM per
+ * frame. The save/load round-trip uses the public uvc_save_container /
+ * uvc_load_container API (roadmap milestone C: real file I/O).
  */
 #include "analyzer.h"
 #include "selector.h"
@@ -106,22 +105,32 @@ int main(void) {
         printf("clip B frame%d: %d bytes (P2)\n", f, enclen[f]);
     }
 
-    /* 2) Mux all frames into one container buffer (the integrator persists it). */
+    /* 2) Mux all frames into one container buffer, then persist it to disk. */
     uint8_t *cont = malloc(1 << 20);
     int clen = uvc_mux(ptrs, enclen, nframes, W, H, paradigm, cont, 1 << 20);
     if (clen < 0) { printf("mux failed\n"); return 1; }
     printf("muxed %d frames -> %d bytes\n", nframes, clen);
 
-    /* (Integrator responsibility: save `cont` to movie.uvc, transmit, reload.) */
-    FILE *mf = fopen("movie.uvc", "wb");
-    if (mf) { fwrite(cont, 1, (size_t)clen, mf); fclose(mf); }
+    /* Persist the container to a real .uvc file on disk. */
+    if (uvc_save_container("movie.uvc", cont, (size_t)clen) != 0) {
+        printf("save movie.uvc failed\n"); return 1;
+    }
+    printf("saved movie.uvc (%d bytes)\n", clen);
 
-    /* 3) Decode side: demux, then per-frame decode by paradigm id. */
+    /* 3) Decode side: reload the container from disk, demux, then per-frame
+     *    decode by paradigm id. (Closes the loop: encode -> persist -> reload.) */
+    uint8_t *loaded = malloc(1 << 20);
+    size_t loaded_len = 0;
+    if (uvc_load_container("movie.uvc", loaded, 1 << 20, &loaded_len) != 0) {
+        printf("load movie.uvc failed\n"); return 1;
+    }
+    printf("loaded movie.uvc (%zu bytes)\n", loaded_len);
+
     int dw = 0, dh = 0, dn = 0;
     const uint8_t *dframes[4];
     int dlens[4];
     uint8_t dpar[4];
-    int got = uvc_demux(cont, (size_t)clen, &dw, &dh, &dn, dframes, dlens, dpar);
+    int got = uvc_demux(loaded, loaded_len, &dw, &dh, &dn, dframes, dlens, dpar);
     printf("demux: %d frames, %dx%d\n", got, dw, dh);
 
     int16_t *rec = malloc((size_t)W * H * sizeof(int16_t));
@@ -140,7 +149,8 @@ int main(void) {
     }
 
     free(rec);
+    free(loaded);
     free(cont);
-    printf("done. container saved as movie.uvc; frames as frame_*.pgm\n");
+    printf("done. container saved+reloaded as movie.uvc; frames as frame_*.pgm\n");
     return 0;
 }

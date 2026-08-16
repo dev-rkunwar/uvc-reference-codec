@@ -330,9 +330,10 @@ splash frames in P1 and photographic frames in P2 within one stream.
 | P4 (semantic token) coarse layer (2× downsample + INT4 token + rANS) | ✅ Implemented & verified | VCM/PAT-VCM analogue; lossy low-rate (~0.6 bpp) structure layer; decodes only with held model hash (model-hash gate, Tier-2). |
 | rANS entropy coder (64-bit, word renorm) | ✅ Implemented & verified | Faithful port of ryg `rans64.h`; works for *any* distribution. |
 | Container mux/demux (ISOBMFF-style, P1+P2+P3+P4 map + `uvsh`) | ✅ Implemented & verified | Big-endian, integer-only, bit-exact. |
+| Container file I/O (`uvc_save_container`/`uvc_load_container`) | ✅ Implemented & verified | Real `.uvc` read/write via `stdio`; demo muxes→saves→reloads→demuxes; `test_container_fileio` asserts byte-identical round-trip. |
 | Analyzer / selector | ✅ Implemented (heuristic) | Integer-only stats stand in for the spec's NN backbone. |
 | Tier negotiation | ✅ Implemented | P1 always allowed; P2/P3 gated by tier; P4 gated by tier + held model hash. |
-| Color (chroma), audio, inter-frame/motion, real file I/O, GPU display | ❌ Out of scope | Integrator responsibility. |
+| Color (chroma), audio, inter-frame/motion, GPU display | ❌ Out of scope | Integrator responsibility. |
 
 **Bottom line for "different kinds of videos":** today you can genuinely encode,
 store, and decode **grayscale, single-frame-at-a-time** video in two paradigms —
