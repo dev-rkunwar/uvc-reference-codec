@@ -1,167 +1,222 @@
-/* common/rans.c - Static canonical Huffman coder (spec §6.2 scaffold).
- * Verifiably correct; bit-exact; integer-only. See rans.h for the rANS note.
+/* common/rans.c - Integer rANS entropy coder (spec §6.2).
  *
- * API mirrors the rANS design so callers are unchanged when rANS lands.
+ * Verbatim-faithful port of Fabian Giesen's public-domain rans64.h:
+ * 64-bit state, word-based (32-bit) renormalization with L = 2^31. This is the
+ * variant that works for ANY distribution (unlike rans_byte.h, which requires
+ * every frequency F >= M/256 and therefore fails on the highly-peaked DCT
+ * magnitude distributions UVC produces -> stream desync).
+ *
+ * Cross-platform determinism: the ryg original writes native-endian uint32_t
+ * words via a uint32_t*; we instead emit EXPLICIT little-endian 32-bit words so
+ * the bitstream is byte-identical on every target. The final 64-bit state is
+ * flushed as two LE words at the front of the stream.
+ *
+ * rANS is LIFO: the encoder processes symbols LAST->FIRST and writes the
+ * renorm-word stream BACKWARD from the tail of the buffer; the decoder reads
+ * FIRST->LAST and consumes words forward. No manual array reversal is needed.
+ *
+ * API note: to keep callers (encoder/p1.c, decoder/p1.c, tools/uvctest.c)
+ * unchanged, the encoder buffers symbols during rans_enc_put() and performs the
+ * reverse-order rANS emission in rans_enc_finish(); the decoder is naturally
+ * forward-streaming. The 32-byte frame header carries the raw symbol counts;
+ * both sides rebuild the identical rANS table from them.
  */
 #include "rans.h"
+#include <stdlib.h>
 #include <string.h>
 
-/* ---------- canonical Huffman build ---------- */
+/* ---------- distribution build ---------- */
 
-/* Find two smallest nodes among active; returns indices via a,b (-1 if none). */
-static void pick_two(const int *weight, const int *active, int count,
-                     int *a, int *b) {
-    *a = *b = -1;
-    for (int i = 0; i < count; i++) {
-        if (!active[i]) continue;
-        if (*a < 0 || weight[i] < weight[*a]) { *b = *a; *a = i; }
-        else if (*b < 0 || weight[i] < weight[*b]) { *b = i; }
-    }
+static int find_sym(const rans_dist_t *d, uint32_t slot) {
+    for (int i = 0; i < d->n; i++)
+        if (slot >= d->cum[i] && slot < d->cum[i] + d->freq[i]) return i;
+    return -1;
 }
 
+/* Normalize raw counts into a power-of-two mass table (sum = m = 1<<p) with
+ * every symbol freq >= 1 and freqs that fit uint16 (m <= 1<<RANS_P_MAX). We try
+ * p from largest (best resolution / best compression) down to 1 and accept the
+ * first representable table, distributing the small rounding remainder one unit
+ * at a time so the distribution shape is preserved (not flattened). A single
+ * symbol may occupy the whole alphabet (freq == m). */
 int rans_dist_build(rans_dist_t *d, const uint32_t *counts, int n) {
-    if (n <= 0 || n > 16) return -1;
-    memset(d, 0, sizeof(*d));
-    d->n = (uint8_t)n;
+    if (n <= 0 || n > RANS_N_MAX) return -1;
+    uint64_t total = 0;
+    for (int i = 0; i < n; i++) total += counts[i];
+    if (total == 0) return -1;
 
-    /* Ensure every symbol has weight >= 1 so the tree is well-formed. */
-    int weight[32];
-    int active[32];
-    int node_count = 0;
-    for (int i = 0; i < n; i++) {
-        d->freq[i] = (uint16_t)(counts[i] ? counts[i] : 1);
-        weight[node_count] = d->freq[i];
-        active[node_count] = 1;
-        node_count++;
-    }
-
-    /* Build Huffman tree: merge two smallest into a new parent node. */
-    int parent[32];
-    for (int i = 0; i < 32; i++) parent[i] = -1;
-    int total_nodes = node_count;
-    int merges = node_count - 1;
-    if (merges > 0) {
-        for (int m = 0; m < merges; m++) {
-            int a, b;
-            pick_two(weight, active, total_nodes, &a, &b);
-            /* new internal node */
-            int ni = total_nodes++;
-            weight[ni] = weight[a] + weight[b];
-            active[ni] = 1;
-            active[a] = 0; active[b] = 0;
-            parent[a] = ni; parent[b] = ni;
+    for (int b = RANS_P_MAX; b >= 1; b--) {
+        uint32_t M = (uint32_t)1 << b;
+        uint32_t f[RANS_N_MAX];
+        uint64_t cap = (n == 1) ? (uint64_t)M : (uint64_t)(M - 1);
+        if (cap > 65535) cap = 65535;
+        int ok = 1;
+        for (int i = 0; i < n; i++) {
+            uint64_t fi = ((uint64_t)counts[i] * M + total / 2) / total; /* round */
+            if (fi < 1) fi = 1;
+            if (fi > cap) { ok = 0; break; }
+            f[i] = (uint32_t)fi;
         }
-    }
-    int root = total_nodes - 1;
-
-    /* Compute code length per leaf symbol by walking to root. */
-    uint8_t len[16];
-    int maxlen = 0;
-    for (int s = 0; s < n; s++) {
-        int depth = 0, cur = s;
-        while (parent[cur] != -1) { depth++; cur = parent[cur]; }
-        len[s] = (uint8_t)depth;
-        if (depth > maxlen) maxlen = depth;
-    }
-    if (maxlen == 0) { len[0] = 1; maxlen = 1; } /* single symbol edge case */
-
-    /* Canonical code assignment (DEFLATE-style). */
-    int bl_count[32];
-    memset(bl_count, 0, sizeof(bl_count));
-    for (int s = 0; s < n; s++) bl_count[len[s]]++;
-
-    int next_code[32];
-    {
-        int code = 0;
-        for (int bits = 1; bits <= maxlen; bits++) {
-            code = (code + bl_count[bits - 1]) << 1;
-            next_code[bits] = code;
+        if (!ok) continue;
+        uint64_t sum = 0;
+        for (int i = 0; i < n; i++) sum += f[i];
+        if (sum != M) {                            /* distribute remainder minimally */
+            int32_t delta = (int32_t)(M - sum);    /* >0: add units; <0: remove units */
+            if (delta < 0) {
+                for (int k = 0; k < -delta; k++) {
+                    int mi = 0;
+                    for (int i = 1; i < n; i++) if (f[i] > f[mi]) mi = i;
+                    if (f[mi] <= 1) { ok = 0; break; }
+                    f[mi]--;
+                }
+            } else {
+                for (int k = 0; k < delta; k++) {
+                    int mi = 0;
+                    for (int i = 1; i < n; i++) if (f[i] > f[mi]) mi = i;
+                    if (f[mi] >= cap) { ok = 0; break; }
+                    f[mi]++;
+                }
+            }
+            if (!ok) continue;
+            sum = 0; for (int i = 0; i < n; i++) sum += f[i];
+            if (sum != M) ok = 0;
         }
-    }
-    for (int s = 0; s < n; s++) {
-        int l = len[s];
-        if (l != 0) {
-            d->code[s] = (uint16_t)next_code[l];
-            next_code[l]++;
-        } else {
-            d->code[s] = 0;
+        if (!ok) continue;
+
+        memset(d, 0, sizeof(*d));
+        d->n = (uint8_t)n;
+        d->p = (uint8_t)b;
+        d->m = M;
+        for (int i = 0; i < n; i++) d->raw[i] = counts[i];
+        uint32_t acc = 0;
+        for (int i = 0; i < n; i++) {
+            d->freq[i] = f[i];
+            d->cum[i] = acc;
+            acc += f[i];
         }
-        d->len[s] = (uint8_t)l;
+        if (acc != M) return -1;
+        return 0;
     }
-    d->maxlen = (uint8_t)maxlen;
-    return 0;
+    return -1;
 }
 
-/* ---------- bit-level I/O (MSB-first) ---------- */
+/* ---------- encoder ---------- */
 
-static void enc_flush_byte(rans_enc_t *e) {
-    /* Left-align so a partial final byte is read MSB-first by the decoder. */
-    uint8_t b = (uint8_t)((e->bitbuf << (8 - e->bitcnt)) & 0xFF);
-    if (e->out_len + 1 <= (e->out_end - e->out))
-        e->out[e->out_len++] = b;
-    e->bitbuf = 0; e->bitcnt = 0;
-}
-
-static void enc_bit(rans_enc_t *e, int b) {
-    e->bitbuf = (e->bitbuf << 1) | (b & 1);
-    e->bitcnt++;
-    if (e->bitcnt == 8) enc_flush_byte(e);
+static uint8_t *ensure_symbuf(rans_enc_t *e, int extra) {
+    if (e->nsyms + extra <= e->symcap) return e->syms;
+    int newcap = e->symcap ? e->symcap * 2 : 256;
+    while (newcap < e->nsyms + extra) newcap *= 2;
+    uint8_t *nb = realloc(e->syms, (size_t)newcap);
+    if (!nb) return NULL;
+    e->syms = nb;
+    e->symcap = newcap;
+    return e->syms;
 }
 
 void rans_enc_init(rans_enc_t *e, uint8_t *buf, int cap) {
-    e->out = buf; e->out_end = buf + cap; e->out_len = 0;
-    e->bitbuf = 0; e->bitcnt = 0;
+    e->out = buf;
+    e->out_end = buf + cap;
+    e->out_len = 0;
+    e->syms = NULL;
+    e->nsyms = 0;
+    e->symcap = 0;
+    e->d = NULL;
 }
 
 int rans_enc_put(rans_enc_t *e, const rans_dist_t *d, int sym) {
     if (sym < 0 || sym >= d->n) return -1;
-    uint16_t code = d->code[sym];
-    int l = d->len[sym];
-    for (int i = l - 1; i >= 0; i--)
-        enc_bit(e, (code >> i) & 1);
+    if (e->d == NULL) e->d = d;          /* capture the distribution */
+    if (!ensure_symbuf(e, 1)) return -1;
+    e->syms[e->nsyms++] = (uint8_t)sym;
     return 0;
 }
 
+static void put_le32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t get_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Emit the buffered symbols (reverse order) into out[], returning the number of
+ * bytes written (>=0) or -1 on overflow. Frees the internal symbol buffer. */
 int rans_enc_finish(rans_enc_t *e) {
-    /* Pad final partial byte with zero bits. */
-    if (e->bitcnt > 0) enc_flush_byte(e);
-    return e->out_len;
+    const rans_dist_t *d = e->d;
+    if (!d) { free(e->syms); e->syms = NULL; return -1; }
+
+    int n = e->nsyms;
+    uint32_t p = d->p;
+    uint8_t *base = e->out;
+    int cap = (int)(e->out_end - base);
+
+    if (n == 0) {                        /* empty stream: just the start state */
+        if (cap < 8) { free(e->syms); e->syms = NULL; return -1; }
+        uint64_t x0 = RANS64_L;
+        for (int b = 0; b < 8; b++) base[b] = (uint8_t)(x0 >> (8 * b));
+        free(e->syms); e->syms = NULL;
+        e->out_len = 8;
+        return 8;
+    }
+
+    uint64_t x = RANS64_L;
+    uint8_t *ptr = base + cap;           /* write backward from the tail */
+    for (int i = n - 1; i >= 0; i--) {   /* rANS: encode LAST symbol first */
+        uint32_t F = d->freq[e->syms[i]], C = d->cum[e->syms[i]];
+        uint64_t x_max = ((RANS64_L >> p) << 32) * F;   /* renormalize threshold */
+        if (x >= x_max) {
+            if (ptr - 4 < base) { free(e->syms); e->syms = NULL; return -1; }
+            ptr -= 4;
+            put_le32(ptr, (uint32_t)x);
+            x >>= 32;
+        }
+        x = ((x / F) << p) + (x % F) + C;
+    }
+    if (ptr - 8 < base) { free(e->syms); e->syms = NULL; return -1; }
+    ptr -= 8;
+    for (int b = 0; b < 8; b++) ptr[b] = (uint8_t)(x >> (8 * b));
+
+    int len = (int)(base + cap - ptr);
+    /* move the tail-written stream to the front so consumers read from out[0] */
+    if (ptr != base) memmove(base, ptr, (size_t)len);
+    free(e->syms); e->syms = NULL;
+    e->out_len = len;
+    return len;
 }
 
 /* ---------- decoder ---------- */
 
-static int dec_read_bit(rans_dec_t *dec) {
-    if (dec->bitcnt == 0) {
-        if (dec->in < dec->in_end) {
-            dec->bitbuf = (uint32_t)(*dec->in++) << 24;
-            dec->bitcnt = 8;
-        } else {
-            dec->bitbuf = 0; dec->bitcnt = 0;
-        }
-    }
-    int b = (dec->bitbuf >> 31) & 1;
-    dec->bitbuf <<= 1;
-    dec->bitcnt--;
-    return b;
-}
-
 void rans_dec_init(rans_dec_t *dec, const uint8_t *buf, int len) {
-    dec->in = buf; dec->in_end = buf + len;
-    dec->bitbuf = 0; dec->bitcnt = 0;
+    dec->cur = buf;
+    dec->end = buf + len;
+    dec->x = 0;
+    if (len >= 8) {
+        for (int b = 0; b < 8; b++) dec->x |= (uint64_t)buf[b] << (8 * b);
+        dec->cur = buf + 8;
+    }
+    dec->m = 0;
+    dec->p = 0;
 }
 
 int rans_dec_get(rans_dec_t *dec, const rans_dist_t *d) {
-    unsigned cur = 0;
-    for (int bits = 1; bits <= d->maxlen; bits++) {
-        cur = (cur << 1) | (unsigned)dec_read_bit(dec);
-        for (int s = 0; s < d->n; s++) {
-            if (d->len[s] == bits && (unsigned)d->code[s] == cur)
-                return s;
-        }
+    uint32_t M = d->m, p = d->p;
+    if (M == 0) return -1;
+    uint32_t slot = (uint32_t)(dec->x & (M - 1));
+    int s = find_sym(d, slot);
+    if (s < 0) return -1;
+    uint32_t F = d->freq[s], C = d->cum[s];
+    dec->x = (uint64_t)F * (dec->x >> p) + slot - C;
+    if (dec->x < RANS64_L) {             /* renormalize: pull one LE word */
+        if (dec->cur + 4 > dec->end) return -1;
+        uint32_t w = get_le32(dec->cur);
+        dec->cur += 4;
+        dec->x = (dec->x << 32) | w;
     }
-    return -1; /* corrupt stream */
+    return s;
 }
 
 int rans_dec_tell(const rans_dec_t *dec) {
-    return (int)(dec->in_end - dec->in);
+    return (int)(dec->end - dec->cur);
 }

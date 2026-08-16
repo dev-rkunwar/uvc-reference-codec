@@ -70,9 +70,12 @@ UVC_Specification.md   Full design specification
   DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy
   coding → IDCT. Full encode→decode round-trip is bit-exact when the signal fits
   the INT8 quantizer (verified by `test_p1_pipeline`).
-- Entropy coder — a verifiably-correct **canonical Huffman** coder behind the
-  `rans_*` API (the spec's normative target, §6.2, is integer rANS; the scaffold
-  ships the Huffman placeholder so the pipeline is testable end-to-end).
+- Entropy coder — integer **rANS** (64-bit state, word-based renormalization,
+  L=2^31), a faithful port of Fabian Giesen's public-domain `rans64.h`. This is
+  the spec's normative target (§6.2) and works for ANY distribution (unlike the
+  32-bit byte variant, which requires every frequency F ≥ M/256 and would desync
+  on the peaked DCT-magnitude distributions UVC produces). Bit-exact and
+  deterministic across platforms (little-endian 32-bit words).
 - Quantizer — INT8 / INT4 scalar quantization with round-trip + clamping.
 - Bitstream — bit-exact `bw_put` / `br_get` writer/reader (64-bit accumulator,
   multi-byte safe).
@@ -87,7 +90,7 @@ UVC_Specification.md   Full design specification
 **Stubs (not yet implemented):**
 - P2–P4 encode/decode pipelines (wavelet, learned/neural residual, neural generative).
 - Neural model inference.
-- The normative integer rANS coder (§6.2) — currently the Huffman placeholder.
+- The rANS coder is implemented; remaining work is the P2–P4 neural paradigms.
 
 ## Determinism
 

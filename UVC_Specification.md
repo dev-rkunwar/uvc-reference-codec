@@ -735,7 +735,7 @@ container are intentionally stubbed pending the roadmap in issue #1.
 
 | Component | Status in scaffold | Notes |
 |-----------|--------------------|-------|
-| Entropy coder (`common/rans.*`) | Substitution | Spec §6.2 mandates integer rANS; the scaffold ships a **canonical Huffman** coder behind the same `rans_*` API for verifiability. The normative rANS is a drop-in replacement. |
+| Entropy coder (`common/rans.*`) | **Implemented (verified)** | Integer rANS port of Fabian Giesen's rans64.h (64-bit state, word-based renorm, L=2^31) — no per-symbol frequency constraint, correct for ANY distribution. Little-endian 32-bit words for cross-platform determinism. Verified by `test_rans` + full P1 pipeline round-trip (MAE=0). |
 | Quantizer (`common/quant.h`) | Implemented | Fixed INT8/INT4; integer-only, `uint16` Q1.15 scale (real_scale < 2). |
 | Bitstream (`common/bitstream.*`) | Implemented | MSB-first writer/reader; 64-bit accumulator. |
 | Analyzer (`encoder/analyzer.*`) | Implemented | Integer Q8.8 heuristic, no float. |
