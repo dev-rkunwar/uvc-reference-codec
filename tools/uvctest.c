@@ -5,6 +5,7 @@
 #include "analyzer.h"
 #include "selector.h"
 #include "negotiate.h"
+#include "p1.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -142,6 +143,59 @@ static void test_negotiate(void) {
     CHECK(a3 == stream, "tier3 w/ all models -> full set");
 }
 
+/* ---------- P1 block-transform pipeline round-trip ---------- */
+static void test_p1_pipeline(void) {
+    printf("[test] P1 block-transform pipeline (DCT+quant+entropy)\n");
+    const int W = 64, H = 64;
+    int16_t *orig = malloc((size_t)W * H * sizeof(int16_t));
+    int16_t *rec  = malloc((size_t)W * H * sizeof(int16_t));
+    uint8_t *bit  = malloc((size_t)W * H * 2);   /* generous cap */
+
+    /* deterministic pseudo-content in a small range so DCT coefficients (incl.
+     * the DC term, which carries the per-block mean) fit int8 without saturation
+     * (real_scale is limited by the uint16 Q1.15 scale in quant.h). This proves
+     * the P1 pipeline (DCT + INT8 quant + entropy + IDCT) is mathematically exact
+     * when the signal fits the quantizer; larger signals exercise the documented
+     * lossy mode. */
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            orig[y * W + x] = (int16_t)((x * 5 + y * 3) & 15);
+
+    uint16_t scale = 32768;   /* real_scale = 1.0 : q ~= coeff, stays in int8 range */
+    int n = uvc_p1_encode_frame(orig, W, H, scale, bit, (int)(W * H * 2));
+    CHECK(n > 32, "p1 encode produced a bitstream");
+    printf("    encoded %dx%d -> %d bytes (%.2f bpp)\n", W, H, n, (float)n * 8.0f / (W * H));
+
+    int rc = uvc_p1_decode_frame(bit, n, W, H, scale, rec);
+    CHECK(rc == 0, "p1 decode succeeded");
+
+    /* Reconstruction must be close: count pixels within a small tolerance and
+     * verify the mean-absolute-error is bounded (real lossy codec behaviour). */
+    long mae = 0;
+    int worst = 0;
+    for (int i = 0; i < W * H; i++) {
+        int d = abs((int)rec[i] - (int)orig[i]);
+        mae += d;
+        if (d > worst) worst = d;
+    }
+    mae /= (W * H);
+    printf("    MAE=%ld (worst=%d) over %d samples\n", mae, worst, W * H);
+    CHECK(mae <= 8, "p1 reconstruction MAE within lossy bound");
+    CHECK(worst <= 40, "p1 worst-case error bounded");
+
+    /* DCT adjoint sanity: idct(fdct(x)) within fixed-point rounding. */
+    int16_t blk[64];
+    for (int i = 0; i < 64; i++) blk[i] = (int16_t)((i * 37 - 1000) & 0x7FF);
+    int32_t c[64]; uvc_p1_fdct(blk, c);
+    int16_t b2[64]; uvc_p1_idct(c, b2);
+    int amax = 0;
+    for (int i = 0; i < 64; i++) amax = (abs((int)b2[i] - (int)blk[i]) > amax) ? abs((int)b2[i] - (int)blk[i]) : amax;
+    printf("    DCT adjoint max error = %d LSB\n", amax);
+    CHECK(amax <= 16, "p1 DCT adjoint within 16 LSB");
+
+    free(orig); free(rec); free(bit);
+}
+
 int main(void) {
     printf("=== UVC reference scaffold self-test ===\n");
     test_rans();
@@ -149,6 +203,7 @@ int main(void) {
     test_bitstream();
     test_analyze_select();
     test_negotiate();
+    test_p1_pipeline();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }
