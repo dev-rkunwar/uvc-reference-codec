@@ -327,11 +327,11 @@ splash frames in P1 and photographic frames in P2 within one stream.
 | P1 block-transform (DCT + INT8 quant + rANS) | ✅ Implemented & verified | Bit-exact round-trip when signal fits INT8. |
 | P2 integer wavelet (LeGall 5/3 + INT8 quant + rANS) | ✅ Implemented & verified | Lossless transform (adjoint error = 0 LSB). |
 | P3 (INR) coord-hash scaffold (hash perm + INT8 quant + rANS) | ✅ Implemented & verified | Content-adaptive MLHB-style coordinate-hash permutation; lossless at scale 1.0; Tier-2. |
+| P4 (semantic token) coarse layer (2× downsample + INT4 token + rANS) | ✅ Implemented & verified | VCM/PAT-VCM analogue; lossy low-rate (~0.6 bpp) structure layer; decodes only with held model hash (model-hash gate, Tier-2). |
 | rANS entropy coder (64-bit, word renorm) | ✅ Implemented & verified | Faithful port of ryg `rans64.h`; works for *any* distribution. |
-| Container mux/demux (ISOBMFF-style, P1+P2+P3 map + `uvsh`) | ✅ Implemented & verified | Big-endian, integer-only, bit-exact. |
+| Container mux/demux (ISOBMFF-style, P1+P2+P3+P4 map + `uvsh`) | ✅ Implemented & verified | Big-endian, integer-only, bit-exact. |
 | Analyzer / selector | ✅ Implemented (heuristic) | Integer-only stats stand in for the spec's NN backbone. |
-| Tier negotiation | ✅ Implemented | P1 always allowed; P2/P3 gated by tier (P4 gated by tier + model hash). |
-| **P4 (semantic token)** pipeline | ❌ Stub | Signal + negotiation bits exist, but no encode/decode pipeline in the Tier-1 integer scaffold yet. |
+| Tier negotiation | ✅ Implemented | P1 always allowed; P2/P3 gated by tier; P4 gated by tier + held model hash. |
 | Color (chroma), audio, inter-frame/motion, real file I/O, GPU display | ❌ Out of scope | Integrator responsibility. |
 
 **Bottom line for "different kinds of videos":** today you can genuinely encode,

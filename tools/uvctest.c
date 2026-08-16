@@ -8,6 +8,7 @@
 #include "p1.h"
 #include "p2.h"
 #include "p3.h"
+#include "p4.h"
 #include "container.h"
 #include "segment.h"
 #include <stdio.h>
@@ -483,6 +484,113 @@ static void test_p3_segment(void) {
     free(cont);
 }
 
+/* ---------- P4 semantic/task layer scaffold round-trip ---------- */
+static void test_p4_pipeline(void) {
+    printf("[test] P4 semantic layer scaffold (2x downsample + token + entropy)\n");
+    const int W = 64, H = 64;
+    int16_t *orig = malloc((size_t)W * H * sizeof(int16_t));
+    int16_t *rec  = malloc((size_t)W * H * sizeof(int16_t));
+    uint8_t *bit  = malloc((size_t)W * H * 2);
+
+    /* Smooth-ish content so the 2x-coarse token map is a faithful structure
+     * proxy (the semantic layer intentionally keeps structure, not detail). */
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            orig[y * W + x] = (int16_t)((x / 4 + y / 4) & 15);
+
+    uint16_t scale = 32768;   /* real_scale = 1.0 */
+    int n = uvc_p4_encode_frame(orig, W, H, scale, bit, (int)(W * H * 2));
+    CHECK(n > 36, "p4 encode produced a bitstream");
+    printf("    encoded %dx%d -> %d bytes (%.2f bpp)\n", W, H, n, (float)n * 8.0f / (W * H));
+
+    int rc = uvc_p4_decode_frame(bit, n, W, H, scale, rec);
+    CHECK(rc == 0, "p4 decode succeeded");
+
+    /* P4 is lossy/coarse by design: verify the coarse structure is preserved
+     * within a bounded error (block-mean fidelity), not pixel-exact. */
+    long mae = 0;
+    int worst = 0;
+    for (int i = 0; i < W * H; i++) {
+        int d = abs((int)rec[i] - (int)orig[i]);
+        mae += d;
+        if (d > worst) worst = d;
+    }
+    mae /= (W * H);
+    printf("    MAE=%ld (worst=%d) over %d samples (coarse layer, bounded)\n", mae, worst, W * H);
+    CHECK(mae <= 12, "p4 coarse reconstruction within bounded MAE (semantic layer)");
+    CHECK(worst <= 16, "p4 worst-case error bounded (semantic layer)");
+
+    /* Model-hash gate: a wrong model hash in the header must refuse. */
+    uint8_t *bad = malloc((size_t)n);
+    memcpy(bad, bit, (size_t)n);
+    bad[0] ^= 0xFF; bad[1] ^= 0xFF;   /* corrupt the model hash */
+    int rc_bad = uvc_p4_decode_frame(bad, n, W, H, scale, rec);
+    CHECK(rc_bad != 0, "p4 refuses a mismatched model hash");
+    free(bad);
+
+    free(orig); free(rec); free(bit);
+}
+
+/* ---------- P4-aware segment: plan + signal + model-hash gate ---------- */
+static void test_p4_segment(void) {
+    printf("[test] P4 segment (plan selects P1+P4, model-hash gate)\n");
+    const int W = 32, H = 32, NFR = 4;
+    uint16_t scale = 32768;
+
+    int16_t *orig[NFR];
+    const int16_t *ptrs[NFR];
+    int16_t *rec[NFR];
+    for (int f = 0; f < NFR; f++) {
+        orig[f] = malloc((size_t)W * H * sizeof(int16_t));
+        rec[f]  = malloc((size_t)W * H * sizeof(int16_t));
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                orig[f][y * W + x] = (int16_t)(((x / 2 + y / 2 + f * 3) & 15));
+        ptrs[f] = orig[f];
+    }
+
+    uvc_content_profile_t prof;
+    memset(&prof, 0, sizeof(prof));
+    prof.scene_type = UVC_SCENE_NATURAL;
+    prof.spatial_complex = 200;
+    prof.temporal_complex = 200;
+
+    uvc_segment_config_t cfg;
+    int prc = uvc_plan_segment(&prof, 256, UVC_QUALITY_BALANCE,
+                               UVC_COMPUTE_SERVER, UVC_USE_MACHINE, scale, &cfg);
+    CHECK(prc == 0, "p4 segment plan ok");
+    CHECK((cfg.paradigm_set & UVC_P1_TRADITIONAL) && (cfg.paradigm_set & UVC_P4_SEMANTIC),
+          "plan selects P1+P4 for machine use");
+    CHECK(cfg.tier == 2, "plan tier == 2 (P4 is tier-2)");
+
+    uint8_t *cont = malloc(1 << 20);
+    int clen = uvc_encode_segment(ptrs, NFR, W, H, &cfg, cont, 1 << 20);
+    CHECK(clen > 0, "p4 segment encode produced a container");
+
+    /* tier-3 holding the P4 model: decodes (coarse). */
+    uvc_decoder_config_t t3 = { 3, { UVC_P4_MODEL_HASH }, 1 };
+    uint8_t dpar[NFR];
+    int drc = uvc_decode_segment(cont, (size_t)clen, W, H, &t3, rec, dpar);
+    CHECK(drc == 0, "tier-3 w/ P4 model decode succeeds");
+    if (drc == 0) {
+        CHECK(dpar[0] == UVC_PARADIGM_P1 && dpar[1] == UVC_PARADIGM_P4,
+              "routed base->P1, enhancement->P4");
+    }
+
+    /* tier-2 WITHOUT the P4 model: must refuse (model-hash gate). */
+    uvc_decoder_config_t t2 = { 2, { 0 }, 0 };
+    int drc2 = uvc_decode_segment(cont, (size_t)clen, W, H, &t2, rec, NULL);
+    CHECK(drc2 != 0, "tier-2 without P4 model correctly REFUSES");
+
+    /* tier-3 without the model: also refuses. */
+    uvc_decoder_config_t t3n = { 3, { 0 }, 0 };
+    int drc3 = uvc_decode_segment(cont, (size_t)clen, W, H, &t3n, rec, NULL);
+    CHECK(drc3 != 0, "tier-3 without P4 model correctly REFUSES");
+
+    for (int f = 0; f < NFR; f++) free(orig[f]), free(rec[f]);
+    free(cont);
+}
+
 static void test_container(void) {
     printf("[test] ISOBMFF-style container mux/demux (P1 frames)\n");
     const int W = 32, H = 32, NFR = 4;
@@ -554,6 +662,8 @@ int main(void) {
     test_p3_pipeline();
     test_segment_pipeline();
     test_p3_segment();
+    test_p4_pipeline();
+    test_p4_segment();
     test_container();
     test_container_paradigm();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
