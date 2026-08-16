@@ -7,6 +7,7 @@
 #include "negotiate.h"
 #include "p1.h"
 #include "p2.h"
+#include "p3.h"
 #include "container.h"
 #include "segment.h"
 #include <stdio.h>
@@ -357,7 +358,7 @@ static void test_segment_pipeline(void) {
         mae /= (W * H * NFR);
         printf("    tier3 decode: MAE=%ld (worst=%d) over %d samples\n", mae, worst, W * H * NFR);
         CHECK(mae == 0, "tier-3 reconstruction is bit-exact (scale 1.0, lossless content)");
-        CHECK(dpar[0] == UVC_PARADIGM_P2, "tier-3 routed frames to P2");
+        CHECK(dpar[0] == UVC_PARADIGM_P1, "tier-3 routed base frame to P1");
     }
 
     /* Decode at tier-1 (P2 NOT decodable by base layer) -> must refuse. This
@@ -384,7 +385,104 @@ static void test_segment_pipeline(void) {
     free(cont);
 }
 
-/* ---------- Container mux/demux round-trip (spec §2/§3) ---------- */
+/* ---------- P3 INR-scaffold pipeline round-trip ---------- */
+static void test_p3_pipeline(void) {
+    printf("[test] P3 INR-scaffold pipeline (coord-hash + quant + entropy)\n");
+    const int W = 64, H = 64;
+    int16_t *orig = malloc((size_t)W * H * sizeof(int16_t));
+    int16_t *rec  = malloc((size_t)W * H * sizeof(int16_t));
+    uint8_t *bit  = malloc((size_t)W * H * 2);
+
+    /* Small deterministic content so samples fit int8 at scale 1.0. */
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            orig[y * W + x] = (int16_t)((x * 5 + y * 3) & 15);
+
+    uint16_t scale = 32768;   /* real_scale = 1.0 */
+    int n = uvc_p3_encode_frame(orig, W, H, scale, bit, (int)(W * H * 2));
+    CHECK(n > 36, "p3 encode produced a bitstream");
+    printf("    encoded %dx%d -> %d bytes (%.2f bpp)\n", W, H, n, (float)n * 8.0f / (W * H));
+
+    int rc = uvc_p3_decode_frame(bit, n, W, H, scale, rec);
+    CHECK(rc == 0, "p3 decode succeeded");
+
+    long mae = 0;
+    int worst = 0;
+    for (int i = 0; i < W * H; i++) {
+        int d = abs((int)rec[i] - (int)orig[i]);
+        mae += d;
+        if (d > worst) worst = d;
+    }
+    mae /= (W * H);
+    printf("    MAE=%ld (worst=%d) over %d samples\n", mae, worst, W * H);
+    CHECK(mae == 0, "p3 reconstruction is bit-exact (scale 1.0, lossless permutation)");
+    CHECK(worst == 0, "p3 worst-case error zero (invertible hash)");
+
+    free(orig); free(rec); free(bit);
+}
+
+/* ---------- P3-aware segment: plan + signal + tier-2 decode ---------- */
+static void test_p3_segment(void) {
+    printf("[test] P3 segment (plan selects P1+P3, tier-2 decodes)\n");
+    const int W = 32, H = 32, NFR = 4;
+    uint16_t scale = 32768;
+
+    int16_t *orig[NFR];
+    const int16_t *ptrs[NFR];
+    int16_t *rec[NFR];
+    for (int f = 0; f < NFR; f++) {
+        orig[f] = malloc((size_t)W * H * sizeof(int16_t));
+        rec[f]  = malloc((size_t)W * H * sizeof(int16_t));
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                orig[f][y * W + x] = (int16_t)(((x * 5 + y * 3 + f * 7) & 15));
+        ptrs[f] = orig[f];
+    }
+
+    uvc_content_profile_t prof;
+    memset(&prof, 0, sizeof(prof));
+    prof.scene_type = UVC_SCENE_SCREEN;        /* screen -> P3 per selector */
+    prof.spatial_complex = 200;
+    prof.temporal_complex = 200;
+
+    uvc_segment_config_t cfg;
+    int prc = uvc_plan_segment(&prof, 256, UVC_QUALITY_PROGRESSIVE,
+                               UVC_COMPUTE_REALTIME_NPU, UVC_USE_HUMAN, scale, &cfg);
+    CHECK(prc == 0, "p3 segment plan ok");
+    CHECK((cfg.paradigm_set & UVC_P1_TRADITIONAL) && (cfg.paradigm_set & UVC_P3_INR),
+          "plan selects P1+P3 for screen/progressive");
+    CHECK(cfg.tier == 2, "plan tier == 2 (P3 is tier-2)");
+
+    uint8_t *cont = malloc(1 << 20);
+    int clen = uvc_encode_segment(ptrs, NFR, W, H, &cfg, cont, 1 << 20);
+    CHECK(clen > 0, "p3 segment encode produced a container");
+
+    /* tier-2 decoder (no model needed for P3) reconstructs exactly. */
+    uvc_decoder_config_t t2 = { 2, { 0 }, 0 };
+    uint8_t dpar[NFR];
+    int drc = uvc_decode_segment(cont, (size_t)clen, W, H, &t2, rec, dpar);
+    CHECK(drc == 0, "tier-2 decode (P3 allowed) succeeds");
+    if (drc == 0) {
+        long mae = 0;
+        for (int f = 0; f < NFR; f++)
+            for (int i = 0; i < W * H; i++)
+                mae += abs((int)rec[f][i] - (int)orig[f][i]);
+        mae /= (W * H * NFR);
+        printf("    tier2 decode: MAE=%ld over %d samples\n", mae, W * H * NFR);
+        CHECK(mae == 0, "tier-2 P3 segment reconstruction bit-exact");
+        CHECK(dpar[0] == UVC_PARADIGM_P1 && dpar[1] == UVC_PARADIGM_P3,
+              "routed base->P1, enhancement->P3");
+    }
+
+    /* tier-1 (P3 NOT decodable by base layer) -> must refuse. */
+    uvc_decoder_config_t t1 = { 1, { 0 }, 0 };
+    int drc1 = uvc_decode_segment(cont, (size_t)clen, W, H, &t1, rec, NULL);
+    CHECK(drc1 != 0, "tier-1 correctly REFUSES a P3-encoded segment");
+
+    for (int f = 0; f < NFR; f++) free(orig[f]), free(rec[f]);
+    free(cont);
+}
+
 static void test_container(void) {
     printf("[test] ISOBMFF-style container mux/demux (P1 frames)\n");
     const int W = 32, H = 32, NFR = 4;
@@ -453,7 +551,9 @@ int main(void) {
     test_negotiate();
     test_p1_pipeline();
     test_p2_pipeline();
+    test_p3_pipeline();
     test_segment_pipeline();
+    test_p3_segment();
     test_container();
     test_container_paradigm();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
