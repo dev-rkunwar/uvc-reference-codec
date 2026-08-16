@@ -650,6 +650,67 @@ static void test_container(void) {
     free(cont);
 }
 
+/* ---------- Container real file I/O: save -> load -> demux (byte-exact) ---------- */
+static void test_container_fileio(void) {
+    printf("[test] container real file I/O (save -> load -> demux)\n");
+    const int W = 32, H = 32, NFR = 4;
+    uint16_t scale = 32768;
+    const char *path = "uvc_fileio_test.uvc";
+
+    /* Build an in-memory .uvc buffer (reuse the legacy mux). */
+    int16_t *orig[NFR];
+    uint8_t *enc[NFR];
+    int enc_len[NFR];
+    for (int f = 0; f < NFR; f++) {
+        orig[f] = malloc((size_t)W * H * sizeof(int16_t));
+        enc[f]  = malloc((size_t)W * H * 2);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                orig[f][y * W + x] = (int16_t)(((x * 5 + y * 3 + f * 7) & 15));
+        enc_len[f] = uvc_p1_encode_frame(orig[f], W, H, scale, enc[f], (int)(W * H * 2));
+        CHECK(enc_len[f] > 0, "fileio: frame encode ok");
+    }
+    const uint8_t *ptrs[NFR];
+    for (int f = 0; f < NFR; f++) ptrs[f] = enc[f];
+    uint8_t *cont = malloc(1 << 20);
+    int clen = uvc_mux(ptrs, enc_len, NFR, W, H, NULL, cont, 1 << 20);
+    CHECK(clen > 0, "fileio: mux produced bytes");
+
+    /* Save to disk. */
+    int rc = uvc_save_container(path, cont, (size_t)clen);
+    CHECK(rc == 0, "fileio: save to disk ok");
+
+    /* Load back from disk. */
+    uint8_t *buf = malloc(1 << 20);
+    size_t loaded = 0;
+    rc = uvc_load_container(path, buf, 1 << 20, &loaded);
+    CHECK(rc == 0, "fileio: load from disk ok");
+    CHECK(loaded == (size_t)clen, "fileio: loaded byte count matches");
+    CHECK(memcmp(buf, cont, (size_t)clen) == 0, "fileio: loaded bytes identical to muxed buffer");
+
+    /* Demux + decode the on-disk container. */
+    int dw = 0, dh = 0, dn = 0;
+    const uint8_t *dframes[NFR];
+    int dlens[NFR];
+    int got = uvc_demux(buf, loaded, &dw, &dh, &dn, dframes, dlens, NULL);
+    CHECK(got == NFR, "fileio: demux frame count");
+    int allok = 1;
+    for (int f = 0; f < NFR; f++) {
+        int16_t *rec = malloc((size_t)W * H * sizeof(int16_t));
+        int d = uvc_p1_decode_frame(dframes[f], dlens[f], W, H, scale, rec);
+        long mae = 0;
+        for (int i = 0; i < W * H; i++) mae += abs((int)rec[i] - (int)orig[f][i]);
+        mae /= (W * H);
+        if (mae > 8 || d != 0) allok = 0;
+        free(rec);
+    }
+    CHECK(allok, "fileio: on-disk container decodes bit-exact");
+
+    remove(path);
+    for (int f = 0; f < NFR; f++) { free(orig[f]); free(enc[f]); }
+    free(cont); free(buf);
+}
+
 int main(void) {
     printf("=== UVC reference scaffold self-test ===\n");
     test_rans();
@@ -666,6 +727,7 @@ int main(void) {
     test_p4_segment();
     test_container();
     test_container_paradigm();
+    test_container_fileio();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

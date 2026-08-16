@@ -52,4 +52,13 @@ int uvc_mux_ex(const uint8_t **frames, const int *frame_len, int nframes,
 int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
               const uint8_t **out_frames, int *out_lens, uint8_t *out_par);
 
+/* ---- file I/O (real .uvc persistence; roadmap milestone C) ---- */
+/* Write a container buffer to a file. Returns 0 on success, -1 on error. */
+int uvc_save_container(const char *path, const uint8_t *buf, size_t len);
+
+/* Read a container file into `out` (caller-allocated, cap bytes). On success
+ * sets *out_len to the bytes read and returns 0; returns -1 on error or if the
+ * file exceeds cap. Use uvc_demux on the result. */
+int uvc_load_container(const char *path, uint8_t *out, size_t cap, size_t *out_len);
+
 #endif /* UVC_CONTAINER_H */

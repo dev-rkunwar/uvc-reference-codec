@@ -61,7 +61,7 @@ frame **refuses** it rather than mis-decoding — spec §3.3 / §1).
 | Paradigm Selector | ✅ Done | Decision matrix over analyzer output. `encoder/selector.c`. |
 | Tier negotiation | ✅ Done | `decoder/negotiate.c`; P4 adds the model-hash gate. |
 | Segment signaling (`uvsh`) | ✅ Done | `uvc_plan_segment` / `uvc_encode_segment` / `uvc_decode_segment`. `common/segment.c`. |
-| Container (ISOBMFF-style) | ✅ Done | `ftyp`/`moov`+`mvhd`+`uvcm`/`mdat`, `uvsh` signaling box, big-endian, bit-exact. `common/container.c`. |
+| Container (ISOBMFF-style) | ✅ Done | `ftyp`/`moov`+`mvhd`+`uvcm`/`mdat`, `uvsh` signaling box, big-endian, bit-exact. `common/container.c`. Real file I/O via `uvc_save_container` / `uvc_load_container` (milestone C). |
 | Playback demo | ✅ Done | `tools/uvcplay_demo.c`, now a CMake target. See `docs/playing_videos.md`. |
 | Self-test (`uvctest`) | ✅ Done | All subsystems + P1–P4 pipelines; `=== PASS (0 failures) ===`. |
 | CI | ✅ Done | GitHub Actions: ubuntu clang/gcc + windows mingw. |
@@ -93,6 +93,15 @@ These are the same items flagged in `README.md` (Scope → Stubs) and
 
 Ordered by leverage (what unblocks the most spec behavior). Each should be its
 own PR, committed when green.
+
+| Milestone | Scope | Status |
+|-----------|-------|--------|
+| **A. Color / chroma path** | Per-plane Y+Cb+Cr routed through P1–P4. | 🔲 Pending |
+| **B. Inter-frame GOP + motion** (§3.1) | P-picture prediction within a segment, P1 anchor. | 🔲 Pending |
+| **C. Real container I/O** | `.uvc` read/write from disk via `stdio`. | ✅ Done — `uvc_save_container`/`uvc_load_container` in `common/container.c`; demo muxes→saves→reloads→demuxes from `movie.uvc`; self-test `test_container_fileio` asserts byte-identical save→load→demux→decode. |
+| **D. Neural-ALF in-loop filter** (§4.2) | Fixed-point Wiener-style stub as first real learned slot. | 🔲 Pending |
+| **E. Promote a scaffold to its NN** | e.g. replace P4 token map with trained PAT-VCM tokenizer, fixed bitstream. | 🔲 Pending |
+| **F. Unified rate controller** (§11) | Analyzer↔quant-scale↔target-bitrate loop. | 🔲 Pending |
 
 **A. Color / chroma path** — extend frames to planar Y+Cb+Cr and route the same
 P1–P4 pipelines per plane. Low risk, high visible payoff (real "video").

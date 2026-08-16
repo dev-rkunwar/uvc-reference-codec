@@ -4,6 +4,7 @@
  */
 #include "container.h"
 #include <string.h>
+#include <stdio.h>
 
 /* big-endian helpers (spec §2: boxes are big-endian) */
 static void put_be32(uint8_t *p, uint32_t v) {
@@ -247,4 +248,33 @@ int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
         for (int i = n; i < mn; i++) out_par[i] = UVC_PARADIGM_P1;
     }
     return mn;
+}
+
+/* ---- file I/O (real .uvc persistence; roadmap milestone C) ---- */
+
+int uvc_save_container(const char *path, const uint8_t *buf, size_t len) {
+    if (!path || !buf) return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t wrote = fwrite(buf, 1, len, f);
+    int err = ferror(f);
+    fclose(f);
+    return (wrote == len && !err) ? 0 : -1;
+}
+
+int uvc_load_container(const char *path, uint8_t *out, size_t cap, size_t *out_len) {
+    if (!path || !out || !out_len) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    if ((size_t)sz > cap) { fclose(f); return -1; }   /* buffer too small */
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    size_t got = fread(out, 1, (size_t)sz, f);
+    int err = ferror(f);
+    fclose(f);
+    if (got != (size_t)sz || err) return -1;
+    *out_len = got;
+    return 0;
 }
