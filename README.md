@@ -19,6 +19,7 @@ See [`UVC_Specification.md`](./UVC_Specification.md) for the full design
 | Self-test (`uvctest`) — all subsystems | ✅ PASS (0 failures) |
 | **P1 block-transform pipeline (DCT+quant+entropy round-trip)** | ✅ |
 | **Container (ISOBMFF-style mux/demux of P1 frames)** | ✅ |
+| **Segment signaling header + selector→pipeline wiring (spec §9/§10/§1)** | ✅ |
 | CI (GitHub Actions, Windows + Linux) | ✅ see `.github/workflows/ci.yml` |
 
 The self-test verifies deterministic round-trips for the entropy coder,
@@ -90,6 +91,17 @@ UVC_Specification.md   Full design specification
   complexity heuristic.
 - Selector — paradigm decision matrix over the analyzer output.
 - Negotiate — decoder tier/capability negotiation stub.
+- **Segment signaling + paradigm/tier wiring** (`common/segment.c`) — the
+  per-segment orchestration layer (spec §9/§10/§1). `uvc_plan_segment()` runs
+  the analyzer + selector to pick the paradigm set and required decode tier from
+  content + encode targets; `uvc_encode_segment()` encodes each frame with the
+  chosen codec (P2 wavelet or P1 base) and writes a `uvsh` signaling header box
+  (paradigm set + tier) into the container; `uvc_decode_segment()` demuxes,
+  reads the `uvsh` header, runs `uvc_negotiate_layers()` against the decoder's
+  tier/model config, and routes each frame to the matching pipeline. Frames the
+  decoder cannot satisfy are REFUSED (per spec §7.3/§1 base-layer fallback)
+  rather than silently mis-decoded. P3/P4 are signaled and negotiate correctly
+  but cannot be decoded in this Tier-1 integer scaffold (no neural runtime).
 - **Container** (`common/container.c`) — ISOBMFF-style box mux/demux (`ftyp` /
   `moov` + `mvhd` + `uvcm` / `mdat`) wrapping P1 frame bitstreams in one file;
   big-endian, integer-only, bit-exact round-trip (verified by `test_container`).

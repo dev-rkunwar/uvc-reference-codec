@@ -8,6 +8,7 @@
 #include "p1.h"
 #include "p2.h"
 #include "container.h"
+#include "segment.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,6 +292,98 @@ static void test_container_paradigm(void) {
     free(cont);
 }
 
+/* ---------- Segment signaling + selector->encode->decode wiring --------- */
+static void test_segment_pipeline(void) {
+    printf("[test] segment plan + signaling header + decode routing\n");
+    const int W = 32, H = 32, NFR = 4;
+    uint16_t scale = 32768;
+
+    /* Textured content so the selector (server compute) picks P1+P2. */
+    int16_t *orig[NFR];
+    const int16_t *ptrs[NFR];
+    int16_t *rec[NFR];
+    for (int f = 0; f < NFR; f++) {
+        orig[f] = malloc((size_t)W * H * sizeof(int16_t));
+        rec[f]  = malloc((size_t)W * H * sizeof(int16_t));
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                orig[f][y * W + x] = (int16_t)(((x * 5 + y * 3 + f * 7) & 15));
+        ptrs[f] = orig[f];
+    }
+
+    uvc_content_profile_t prof;
+    memset(&prof, 0, sizeof(prof));
+    prof.spatial_complex = 200;                 /* Q8.8 ~0.78 -> textured/natural */
+    prof.temporal_complex = 200;                 /* Q8.8 ~0.78 > 0.6 -> triggers P2 */
+    prof.scene_type = UVC_SCENE_NATURAL;
+
+    uvc_segment_config_t cfg;
+    int prc = uvc_plan_segment(&prof, 256 /*1.0 Mbps Q8*/, UVC_QUALITY_BALANCE,
+                               UVC_COMPUTE_SERVER, UVC_USE_HUMAN, scale, &cfg);
+    CHECK(prc == 0, "segment plan ok");
+    CHECK((cfg.paradigm_set & UVC_P1_TRADITIONAL) && (cfg.paradigm_set & UVC_P2_NEURAL),
+          "plan selects P1+P2 for textured/server");
+    CHECK(cfg.tier == 2, "plan tier == 2 (highest paradigm is P2)");
+
+    /* Encode the whole segment through the wired pipeline. */
+    uint8_t *cont = malloc(1 << 20);
+    int clen = uvc_encode_segment(ptrs, NFR, W, H, &cfg, cont, 1 << 20);
+    CHECK(clen > 0, "segment encode produced a container");
+
+    /* The signaling header must round-trip: uvsh carries paradigm_set + tier. */
+    const uint8_t *sh = NULL; size_t shlen = 0;
+    int found = uvc_container_find_box(cont, (size_t)clen, 0x75767368u, &sh, &shlen);
+    CHECK(found && shlen >= 5, "uvsh signaling header present");
+    if (found && shlen >= 5) {
+        uint32_t sig_set = ((uint32_t)sh[0] << 24) | ((uint32_t)sh[1] << 16) |
+                           ((uint32_t)sh[2] << 8)  | (uint32_t)sh[3];
+        uint8_t  sig_tier = sh[4];
+        CHECK(sig_set == cfg.paradigm_set, "signaled paradigm_set matches plan");
+        CHECK(sig_tier == cfg.tier, "signaled tier matches plan");
+    }
+
+    /* Decode at tier-3 (P2 allowed, no model needed) -> reconstructs P2 frames. */
+    uvc_decoder_config_t t3 = { 3, { 0 }, 0 };
+    uint8_t dpar[NFR];
+    int drc = uvc_decode_segment(cont, (size_t)clen, W, H, &t3, rec, dpar);
+    CHECK(drc == 0, "tier-3 decode (P2 allowed) succeeds");
+    if (drc == 0) {
+        long mae = 0; int worst = 0;
+        for (int f = 0; f < NFR; f++)
+            for (int i = 0; i < W * H; i++) {
+                int d = abs((int)rec[f][i] - (int)orig[f][i]);
+                mae += d; if (d > worst) worst = d;
+            }
+        mae /= (W * H * NFR);
+        printf("    tier3 decode: MAE=%ld (worst=%d) over %d samples\n", mae, worst, W * H * NFR);
+        CHECK(mae == 0, "tier-3 reconstruction is bit-exact (scale 1.0, lossless content)");
+        CHECK(dpar[0] == UVC_PARADIGM_P2, "tier-3 routed frames to P2");
+    }
+
+    /* Decode at tier-1 (P2 NOT decodable by base layer) -> must refuse. This
+     * proves the capability gate is real, not a silent mis-decode. */
+    uvc_decoder_config_t t1 = { 1, { 0 }, 0 };
+    int drc1 = uvc_decode_segment(cont, (size_t)clen, W, H, &t1, rec, NULL);
+    CHECK(drc1 != 0, "tier-1 correctly REFUSES a P2-encoded segment");
+
+    /* P1-only plan (realtime HW) -> encodable AND decodable at both tiers. */
+    uvc_segment_config_t cfg1;
+    int prc1 = uvc_plan_segment(&prof, 1280 /*5.0 Mbps*/, UVC_QUALITY_BALANCE,
+                                UVC_COMPUTE_REALTIME_HW, UVC_USE_HUMAN, scale, &cfg1);
+    CHECK(prc1 == 0 && (cfg1.paradigm_set == UVC_P1_TRADITIONAL), "realtime HW -> P1 only");
+    if (prc1 == 0) {
+        int c1 = uvc_encode_segment(ptrs, NFR, W, H, &cfg1, cont, 1 << 20);
+        CHECK(c1 > 0, "P1-only segment encode ok");
+        int d1 = uvc_decode_segment(cont, (size_t)c1, W, H, &t1, rec, NULL);
+        CHECK(d1 == 0, "P1-only segment decodes at tier-1");
+        int d3 = uvc_decode_segment(cont, (size_t)c1, W, H, &t3, rec, NULL);
+        CHECK(d3 == 0, "P1-only segment decodes at tier-3");
+    }
+
+    for (int f = 0; f < NFR; f++) free(orig[f]), free(rec[f]);
+    free(cont);
+}
+
 /* ---------- Container mux/demux round-trip (spec §2/§3) ---------- */
 static void test_container(void) {
     printf("[test] ISOBMFF-style container mux/demux (P1 frames)\n");
@@ -360,6 +453,7 @@ int main(void) {
     test_negotiate();
     test_p1_pipeline();
     test_p2_pipeline();
+    test_segment_pipeline();
     test_container();
     test_container_paradigm();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
