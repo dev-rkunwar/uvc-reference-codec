@@ -21,6 +21,18 @@
 #define UVC_PARADIGM_P3 3
 #define UVC_PARADIGM_P4 4
 
+/* Chroma formats (per spec §3.2). 0 = monochrome (Y only). */
+#define UVC_CHROMA_MONO 0
+#define UVC_CHROMA_420  3   /* Y: full, Cb/Cr: half-width, half-height */
+#define UVC_CHROMA_422  2   /* Y: full, Cb/Cr: half-width, full-height */
+#define UVC_CHROMA_444  1   /* Y/Cb/Cr: all full resolution */
+
+/* Plane counts for each chroma format */
+#define UVC_PLANES_MONO 1
+#define UVC_PLANES_420  3
+#define UVC_PLANES_422  3
+#define UVC_PLANES_444  3
+
 /* Locate a top-level box by type in a parsed container buffer. Returns the
  * payload pointer and length, or (NULL,0) if absent. Used to assert the
  * signaling header is present end-to-end. */
@@ -51,6 +63,29 @@ int uvc_mux_ex(const uint8_t **frames, const int *frame_len, int nframes,
  * or -1 on parse error. */
 int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
               const uint8_t **out_frames, int *out_lens, uint8_t *out_par);
+
+/* ---- Chroma support (Milestone A: color/chroma path) ---- */
+/* Extended mux: same as uvc_mux_ex but also writes a `uvcp` chroma-params box
+ * and expects plane-interleaved frames (Y0, Cb0, Cr0, Y1, Cb1, Cr1...).
+ * chroma_fmt: one of UVC_CHROMA_MONO/420/422/444.
+ * plane_frames: array of nframes * nplanes pointers to plane bitstreams.
+ * plane_lens:   array of nframes * nplanes lengths.
+ * Returns total bytes written, or -1 on overflow. */
+int uvc_mux_chroma(const uint8_t **plane_frames, const int *plane_lens,
+                   int nframes, int w, int h, int chroma_fmt,
+                   const uint8_t *paradigms, uint32_t paradigm_set,
+                   uint8_t tier, uint8_t *out, int cap);
+
+/* Extended demux: parses the uvcp box to recover chroma_fmt. If
+ * out_planes is non-NULL it receives the number of planes per frame.
+ * If out_plane_frames/out_plane_lens are non-NULL (each sized >=
+ * nframes * nplanes) they receive pointers and lengths for every plane
+ * in frame-major order. If out_par is non-NULL it receives per-frame
+ * paradigm ids. Returns nframes (>=0) or -1 on parse error. */
+int uvc_demux_chroma(const uint8_t *buf, size_t len,
+                     int *w, int *h, int *nframes, int *out_planes,
+                     const uint8_t **out_plane_frames, int *out_plane_lens,
+                     uint8_t *out_par);
 
 /* ---- file I/O (real .uvc persistence; roadmap milestone C) ---- */
 /* Write a container buffer to a file. Returns 0 on success, -1 on error. */

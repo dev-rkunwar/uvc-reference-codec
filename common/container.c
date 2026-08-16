@@ -250,7 +250,188 @@ int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
     return mn;
 }
 
-/* ---- file I/O (real .uvc persistence; roadmap milestone C) ---- */
+/* ---- Chroma support (Milestone A: color/chroma path) ---- */
+
+static int uvcp_plane_count(int chroma_fmt) {
+    switch (chroma_fmt) {
+        case UVC_CHROMA_420: return 3;
+        case UVC_CHROMA_422: return 3;
+        case UVC_CHROMA_444: return 3;
+        default: return 1; /* UVC_CHROMA_MONO */
+    }
+}
+
+static int uvcp_plane_w(int w, int chroma_fmt, int plane) {
+    if (chroma_fmt == UVC_CHROMA_420 || chroma_fmt == UVC_CHROMA_422) {
+        return (plane == 0) ? w : (w + 1) / 2;
+    }
+    return w;
+}
+
+static int uvcp_plane_h(int h, int chroma_fmt, int plane) {
+    if (chroma_fmt == UVC_CHROMA_420) {
+        return (plane == 0) ? h : (h + 1) / 2;
+    }
+    return h;
+}
+
+/* Extended mux: same as uvc_mux_ex but also writes a `uvcp` chroma-params box
+ * and expects plane-interleaved frames (Y0, Cb0, Cr0, Y1, Cb1, Cr1...). */
+int uvc_mux_chroma(const uint8_t **plane_frames, const int *plane_lens,
+                   int nframes, int w, int h, int chroma_fmt,
+                   const uint8_t *paradigms, uint32_t paradigm_set,
+                   uint8_t tier, uint8_t *out, int cap) {
+    if (nframes < 0 || w <= 0 || h <= 0) return -1;
+    int nplanes = uvcp_plane_count(chroma_fmt);
+    int pos = 0;
+
+    /* ftyp: brand 'UVC1' + minor_version (0) */
+    {
+        uint8_t payload[8];
+        put_be32(payload + 0, UVC_BRAND_FTYP);
+        put_be32(payload + 4, 0);
+        int box = 8 + 8;
+        if (pos + box > cap) return -1;
+        put_be32(out + pos, (uint32_t)box); put_be32(out + pos + 4, 0x66747970u); /* 'ftyp' */
+        memcpy(out + pos + 8, payload, 8);
+        pos += box;
+    }
+
+    /* uvsh: signaling header — paradigm_set (u32) + tier (u8). */
+    {
+        uint8_t pl[5];
+        put_be32(pl + 0, paradigm_set);
+        pl[4] = tier;
+        int box = (int)sizeof(pl) + 8;
+        if (pos + box > cap) return -1;
+        put_be32(out + pos, (uint32_t)box); put_be32(out + pos + 4, 0x75767368u); /* 'uvsh' */
+        memcpy(out + pos + 8, pl, sizeof(pl));
+        pos += box;
+    }
+
+    /* uvcp: chroma parameters — chroma_fmt (u8) + nplanes (u8) + reserved (2) */
+    {
+        uint8_t pl[4];
+        pl[0] = (uint8_t)chroma_fmt;
+        pl[1] = (uint8_t)nplanes;
+        pl[2] = pl[3] = 0;
+        int box = (int)sizeof(pl) + 8;
+        if (pos + box > cap) return -1;
+        put_be32(out + pos, (uint32_t)box); put_be32(out + pos + 4, 0x75766370u); /* 'uvcp' */
+        memcpy(out + pos + 8, pl, sizeof(pl));
+        pos += box;
+    }
+
+    /* moov: mvhd (w,h,nframes,chroma_fmt) + uvcm (per-frame paradigm map) */
+    {
+        uint8_t mvhd[16];
+        put_be32(mvhd + 0, (uint32_t)w);
+        put_be32(mvhd + 4, (uint32_t)h);
+        put_be32(mvhd + 8, (uint32_t)nframes);
+        put_be32(mvhd + 12, (uint32_t)chroma_fmt);
+        int mvhd_box = 16 + 8;
+
+        int uvcm_payload = nframes;
+        int pad = (4 - (uvcm_payload & 3)) & 3;
+        int uvcm_box = (uvcm_payload + pad) + 8;
+
+        int moov_box = mvhd_box + uvcm_box + 8;
+        if (pos + moov_box > cap) return -1;
+        put_be32(out + pos, (uint32_t)moov_box); put_be32(out + pos + 4, 0x6d6f6f76u); /* 'moov' */
+        pos += 8;
+        put_be32(out + pos, (uint32_t)mvhd_box); put_be32(out + pos + 4, 0x6d766864u); /* 'mvhd' */
+        memcpy(out + pos + 8, mvhd, 16); pos += mvhd_box;
+        put_be32(out + pos, (uint32_t)uvcm_box); put_be32(out + pos + 4, 0x7576636du); /* 'uvcm' */
+        for (int i = 0; i < nframes; i++)
+            out[pos + 8 + i] = paradigms ? paradigms[i] : UVC_PARADIGM_P1;
+        pos += uvcm_box;
+    }
+
+    /* mdat: concatenated plane-frame bitstreams, each length-prefixed (u32).
+     * Order: Y0, Cb0, Cr0, Y1, Cb1, Cr1, ... */
+    {
+        int mdat_payload = 0;
+        int total_planes = nframes * nplanes;
+        for (int i = 0; i < total_planes; i++) mdat_payload += 4 + plane_lens[i];
+        int mdat_box = mdat_payload + 8;
+        if (pos + mdat_box > cap) return -1;
+        put_be32(out + pos, (uint32_t)mdat_box); put_be32(out + pos + 4, 0x6d646174u); /* 'mdat' */
+        pos += 8;
+        for (int i = 0; i < total_planes; i++) {
+            put_be32(out + pos, (uint32_t)plane_lens[i]); pos += 4;
+            memcpy(out + pos, plane_frames[i], (size_t)plane_lens[i]); pos += plane_lens[i];
+        }
+    }
+
+    return pos;
+}
+
+/* Extended demux: parses the uvcp box to recover chroma_fmt. */
+int uvc_demux_chroma(const uint8_t *buf, size_t len,
+                     int *w, int *h, int *nframes, int *out_planes,
+                     const uint8_t **out_plane_frames, int *out_plane_lens,
+                     uint8_t *out_par) {
+    const uint8_t *p = buf;
+    const uint8_t *end = buf + len;
+    int got_mvhd = 0, got_mdat = 0, got_uvcp = 0;
+    int mw = 0, mh = 0, mn = 0, mchroma = UVC_CHROMA_MONO;
+    const uint8_t *uvcm_pl = NULL; size_t uvcm_len = 0;
+    int mnplanes = 1;
+
+    uint32_t type; const uint8_t *pl; size_t plen; const uint8_t *nx;
+    while (read_box(p, end, &type, &pl, &plen, &nx) == 0) {
+        if (type == 0x6d6f6f76u) {               /* 'moov' */
+            const uint8_t *q = pl, *qend = pl + plen;
+            while (read_box(q, qend, &type, &pl, &plen, &nx) == 0) {
+                if (type == 0x6d766864u) {        /* 'mvhd' */
+                    if (plen < 12) return -1;
+                    mw = (int)get_be32(pl + 0);
+                    mh = (int)get_be32(pl + 4);
+                    mn = (int)get_be32(pl + 8);
+                    if (plen >= 16) mchroma = (int)get_be32(pl + 12);
+                    got_mvhd = 1;
+                    mnplanes = uvcp_plane_count(mchroma);
+                } else if (type == 0x7576636du) { /* 'uvcm' paradigm map */
+                    uvcm_pl = pl;
+                    uvcm_len = plen;
+                }
+                q = nx;
+            }
+        } else if (type == 0x75766370u) {        /* 'uvcp' chroma params */
+            if (plen >= 2) {
+                mchroma = (int)pl[0];
+                mnplanes = (int)pl[1];
+            }
+            got_uvcp = 1;
+        } else if (type == 0x6d646174u) {        /* 'mdat' */
+            if (out_plane_frames && out_plane_lens) {
+                const uint8_t *q = pl, *qend = pl + plen;
+                int total_planes = mn * mnplanes;
+                for (int i = 0; i < total_planes && q + 4 <= qend; i++) {
+                    uint32_t fl = get_be32(q); q += 4;
+                    if (q + (size_t)fl > qend) return -1;
+                    out_plane_frames[i] = q;
+                    out_plane_lens[i] = (int)fl;
+                    q += fl;
+                }
+            }
+            got_mdat = 1;
+        }
+        p = nx;
+    }
+
+    if (!got_mvhd || !got_mdat) return -1;
+    if (w) *w = mw;
+    if (h) *h = mh;
+    if (nframes) *nframes = mn;
+    if (out_planes) *out_planes = mnplanes;
+    if (out_par && uvcm_pl) {
+        int n = (uvcm_len > (size_t)mn) ? mn : (int)uvcm_len;
+        for (int i = 0; i < n; i++) out_par[i] = uvcm_pl[i];
+        for (int i = n; i < mn; i++) out_par[i] = UVC_PARADIGM_P1;
+    }
+    return mn;
+}
 
 int uvc_save_container(const char *path, const uint8_t *buf, size_t len) {
     if (!path || !buf) return -1;

@@ -331,15 +331,17 @@ splash frames in P1 and photographic frames in P2 within one stream.
 | rANS entropy coder (64-bit, word renorm) | ✅ Implemented & verified | Faithful port of ryg `rans64.h`; works for *any* distribution. |
 | Container mux/demux (ISOBMFF-style, P1+P2+P3+P4 map + `uvsh`) | ✅ Implemented & verified | Big-endian, integer-only, bit-exact. |
 | Container file I/O (`uvc_save_container`/`uvc_load_container`) | ✅ Implemented & verified | Real `.uvc` read/write via `stdio`; demo muxes→saves→reloads→demuxes; `test_container_fileio` asserts byte-identical round-trip. |
+| Chroma (YCbCr 4:2:0/4:2:2/4:4:4, P1 per plane) | ✅ Implemented & verified | `uvc_mux_chroma`/`uvc_demux_chroma` with `uvcp` box; `common/chroma.c` subsampling + per-plane P1 encode/decode; `test_chroma_420` asserts container round-trip + decode within MAE bound. |
 | Analyzer / selector | ✅ Implemented (heuristic) | Integer-only stats stand in for the spec's NN backbone. |
 | Tier negotiation | ✅ Implemented | P1 always allowed; P2/P3 gated by tier; P4 gated by tier + held model hash. |
-| Color (chroma), audio, inter-frame/motion, GPU display | ❌ Out of scope | Integrator responsibility. |
+| Audio, inter-frame/motion, GPU display | ❌ Out of scope | Integrator responsibility. |
 
 **Bottom line for "different kinds of videos":** today you can genuinely encode,
-store, and decode **grayscale, single-frame-at-a-time** video in two paradigms —
-P1 for general/screen content and P2 for natural content at low bitrate — with
-the analyzer choosing between them and tier negotiation governing what a given
-decoder can play. Color, sound, and temporal compression are future work.
+store, and decode **color (YCbCr 4:2:0/4:2:2/4:4:4), single-frame-at-a-time** video
+in two paradigms — P1 for general/screen content and P2 for natural content at
+low bitrate — with the analyzer choosing between them and tier negotiation
+governing what a given decoder can play. Audio, temporal compression (inter-
+frame/motion), and GPU display are future work.
 
 ---
 
