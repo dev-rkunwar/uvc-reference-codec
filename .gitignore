@@ -3,3 +3,7 @@ build/
 *.a
 *.o
 *.obj
+dbg_rans.out
+rans64_ref.h
+tools/dbg_trace.c
+graphify-out/
