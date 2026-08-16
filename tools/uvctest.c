@@ -11,6 +11,7 @@
 #include "p4.h"
 #include "container.h"
 #include "segment.h"
+#include "chroma.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -707,27 +708,119 @@ static void test_container_fileio(void) {
     CHECK(allok, "fileio: on-disk container decodes bit-exact");
 
     remove(path);
-    for (int f = 0; f < NFR; f++) { free(orig[f]); free(enc[f]); }
-    free(cont); free(buf);
-}
+        for (int f = 0; f < NFR; f++) { free(orig[f]); free(enc[f]); }
+        free(cont); free(buf);
+    }
 
-int main(void) {
-    printf("=== UVC reference scaffold self-test ===\n");
-    test_rans();
-    test_quant();
-    test_bitstream();
-    test_analyze_select();
-    test_negotiate();
-    test_p1_pipeline();
-    test_p2_pipeline();
-    test_p3_pipeline();
-    test_segment_pipeline();
-    test_p3_segment();
-    test_p4_pipeline();
-    test_p4_segment();
-    test_container();
-    test_container_paradigm();
-    test_container_fileio();
-    printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
-    return failures ? 1 : 0;
-}
+    /* ---------- Chroma (YCbCr 4:2:0) container mux/demux round-trip ---------- */
+    static void test_chroma_420(void) {
+        printf("[test] chroma container 4:2:0 mux/demux\n");
+        const int W = 64, H = 64;
+        uint16_t scale = 32768;
+        int nframes = 2;
+
+        /* Allocate planes with small values (0..15) so P1 fits in int8 at scale 1.0. */
+        int16_t *y, *cb, *cr;
+        CHECK(uvc_alloc_planes(W, H, UVC_CHROMA_420, &y, &cb, &cr) == 0, "chroma: alloc ok");
+
+        int cw = (W + 1) / 2, ch = (H + 1) / 2;
+        for (int i = 0; i < W * H; i++) y[i] = (int16_t)(i & 0xF);
+        for (int i = 0; i < cw * ch; i++) { cb[i] = (int16_t)(i & 0xF); cr[i] = (int16_t)((i + 7) & 0xF); }
+
+        /* Encode each plane with P1 for two frames. */
+        const int16_t *plane_frames[6];
+        uint8_t *plane_enc[6];
+        int plane_lens[6];
+        int max_plane_bytes = W * H * 2;
+        for (int f = 0; f < nframes; f++) {
+            for (int p = 0; p < 3; p++) {
+                int idx = f * 3 + p;
+                plane_enc[idx] = malloc((size_t)max_plane_bytes);
+                int pw = (p == 0) ? W : cw;
+                int ph = (p == 0) ? H : ch;
+                int16_t *src = (p == 0) ? y : (p == 1) ? cb : cr;
+                plane_lens[idx] = uvc_p1_encode_frame(src, pw, ph, scale,
+                                                      plane_enc[idx], max_plane_bytes);
+                CHECK(plane_lens[idx] > 0, "chroma: plane encode ok");
+                plane_frames[idx] = src;
+            }
+        }
+
+        /* Mux into chroma container. */
+        uint8_t *cont = malloc(1 << 20);
+        uint8_t paradigm[2] = { UVC_PARADIGM_P1, UVC_PARADIGM_P1 };
+        int clen = uvc_mux_chroma((const uint8_t **)plane_enc, plane_lens,
+                                  nframes, W, H, UVC_CHROMA_420,
+                                  paradigm, UVC_P1_TRADITIONAL, 1,
+                                  cont, 1 << 20);
+        CHECK(clen > 0, "chroma: mux_chroma ok");
+
+        /* Demux chroma container. */
+        int dw = 0, dh = 0, dn = 0, dplanes = 0;
+        const uint8_t *dplane_frames[6];
+        int dplane_lens[6];
+        int got = uvc_demux_chroma(cont, (size_t)clen, &dw, &dh, &dn,
+                                   &dplanes, dplane_frames, dplane_lens, NULL);
+        CHECK(got == nframes, "chroma: demux frame count");
+        CHECK(dw == W && dh == H, "chroma: demux dims");
+        CHECK(dplanes == 3, "chroma: demux planes");
+
+        /* Verify plane counts and sizes match. */
+        CHECK(dn == nframes, "chroma: frame count");
+        int total_planes = nframes * dplanes;
+        int allok = 1;
+        for (int i = 0; i < total_planes; i++) {
+            if (dplane_lens[i] != plane_lens[i]) allok = 0;
+        }
+        CHECK(allok, "chroma: all plane lengths preserved");
+
+        /* Decode each plane and verify. */
+        int16_t *rec_y = malloc((size_t)W * H * sizeof(int16_t));
+        int16_t *rec_cb = malloc((size_t)cw * ch * sizeof(int16_t));
+        int16_t *rec_cr = malloc((size_t)cw * ch * sizeof(int16_t));
+        int16_t *rec[3] = { rec_y, rec_cb, rec_cr };
+        for (int f = 0; f < nframes; f++) {
+            const uint8_t *pf[3] = { dplane_frames[f*3], dplane_frames[f*3+1], dplane_frames[f*3+2] };
+            int pl[3] = { dplane_lens[f*3], dplane_lens[f*3+1], dplane_lens[f*3+2] };
+            int rc = uvc_p1_decode_chroma_frame(pf, pl, 3, W, H, UVC_CHROMA_420,
+                                                scale, rec_y, rec_cb, rec_cr);
+            CHECK(rc == 0, "chroma: decode planes ok");
+            for (int p = 0; p < 3; p++) {
+                int pw = (p == 0) ? W : cw;
+                int ph = (p == 0) ? H : ch;
+                int16_t *orig = (p == 0) ? y : (p == 1) ? cb : cr;
+                long mae = 0;
+                for (int i = 0; i < pw * ph; i++) mae += abs((int)rec[p][i] - (int)orig[i]);
+                mae /= (pw * ph);
+                if (mae > 8) allok = 0;
+            }
+        }
+        CHECK(allok, "chroma: all planes reconstruct within MAE bound");
+
+        for (int i = 0; i < 6; i++) free(plane_enc[i]);
+        uvc_free_planes(y, cb, cr);
+        free(rec_y); free(rec_cb); free(rec_cr);
+        free(cont);
+    }
+
+    int main(void) {
+        printf("=== UVC reference scaffold self-test ===\n");
+        test_rans();
+        test_quant();
+        test_bitstream();
+        test_analyze_select();
+        test_negotiate();
+        test_p1_pipeline();
+        test_p2_pipeline();
+        test_p3_pipeline();
+        test_segment_pipeline();
+        test_p3_segment();
+        test_p4_pipeline();
+        test_p4_segment();
+        test_container();
+        test_container_paradigm();
+        test_container_fileio();
+        test_chroma_420();
+        printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
+        return failures ? 1 : 0;
+    }

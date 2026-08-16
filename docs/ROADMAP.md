@@ -96,7 +96,7 @@ own PR, committed when green.
 
 | Milestone | Scope | Status |
 |-----------|-------|--------|
-| **A. Color / chroma path** | Per-plane Y+Cb+Cr routed through P1–P4. | 🔲 Pending |
+| **A. Color / chroma path** | Per-plane Y+Cb+Cr routed through P1–P4. | ✅ Done — `uvc_mux_chroma`/`uvc_demux_chroma` with `uvcp` box; `common/chroma.c` has YCbCr 4:2:0/4:2:2/4:4:4 subsampling + P1 per-plane encode/decode; self-test `test_chroma_420` asserts container round-trip + decode within MAE bound. |
 | **B. Inter-frame GOP + motion** (§3.1) | P-picture prediction within a segment, P1 anchor. | 🔲 Pending |
 | **C. Real container I/O** | `.uvc` read/write from disk via `stdio`. | ✅ Done — `uvc_save_container`/`uvc_load_container` in `common/container.c`; demo muxes→saves→reloads→demuxes from `movie.uvc`; self-test `test_container_fileio` asserts byte-identical save→load→demux→decode. |
 | **D. Neural-ALF in-loop filter** (§4.2) | Fixed-point Wiener-style stub as first real learned slot. | 🔲 Pending |
