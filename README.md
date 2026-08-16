@@ -20,7 +20,8 @@ See [`UVC_Specification.md`](./UVC_Specification.md) for the full design
 | **P1 block-transform pipeline (DCT+quant+entropy round-trip)** | ✅ |
 | **P2 integer wavelet pipeline (DWT+quant+entropy round-trip)** | ✅ |
 | **P3 (INR) coord-hash scaffold pipeline** | ✅ |
-| **Container (ISOBMFF-style mux/demux of P1/P2/P3 frames + `uvsh` signaling)** | ✅ |
+| **P4 (semantic token) coarse-layer scaffold pipeline** | ✅ |
+| **Container (ISOBMFF-style mux/demux of P1/P2/P3/P4 frames + `uvsh` signaling)** | ✅ |
 | **Segment signaling header + selector→pipeline wiring (spec §9/§10/§1)** | ✅ |
 | CI (GitHub Actions, Windows + Linux) | ✅ see `.github/workflows/ci.yml` |
 
@@ -59,7 +60,7 @@ Expected output ends with:
 ## Project layout
 
 ```
-common/      Codec primitives (spec §6 entropy, §12 bitstream, §3 quantize, §9 P1 DCT, §2 container)
+common/      Codec primitives (spec §6 entropy, §12 bitstream, §3 quantize, §9 P1 DCT, §9 P3 coord-hash, §9 P4 semantic token, §2 container)
 encoder/     analyzer.c (complexity heuristic), selector.c (paradigm choice), p1.c (DCT+quant+entropy)
 decoder/     negotiate.c (tier negotiation), p1.c (P1 decode pipeline)
 tools/       uvctest.c — self-test / conformance harness
@@ -109,18 +110,30 @@ UVC_Specification.md   Full design specification
   (paradigm set + tier) into the container; `uvc_decode_segment()` demuxes,
   reads the `uvsh` header, runs `uvc_negotiate_layers()` against the decoder's
   tier/model config, and routes each frame to the matching pipeline (P1 base,
-  P2 wavelet, or P3 coord-hash). Frames the decoder cannot satisfy are REFUSED
-  (per spec §7.3/§1 base-layer fallback) rather than silently mis-decoded.
-  P4 is signaled and negotiates correctly but cannot be decoded in this Tier-1
-  integer scaffold (no neural runtime).
+  P2 wavelet, P3 coord-hash, or P4 semantic token). P4 additionally requires the
+  held model hash (the spec's model-hash gate, §1/§13): a decoder that does not
+  hold the P4 tokenizer model refuses the segment. Frames the decoder cannot
+  satisfy are REFUSED (per spec §7.3/§1 base-layer fallback) rather than silently
+  mis-decoded.
+- P4 semantic/task layer scaffold — a **2×-downsampled coarse token map**
+  (MLHB-style, VCM/PAT-VCM analogue) (`common/p4.c`). Each 2×2 block is reduced
+  to its mean, INT4-quantized into a semantic token, and rANS-coded (mirroring
+  P1/P2/P3). The decoder dequantizes and upsamples (nearest) back to full
+  resolution. P4 is intentionally *lossy and low-rate* (0.6–0.7 bpp) — it carries
+  structure, not detail, which is the role of a machine-vision semantic layer.
+  It is the only paradigm that exercises the **model-hash gate**: decoding needs
+  tier ≥ 2 AND the held P4 model hash (0x55667788). Tier-2/tier-3 decoders
+  *without* the hash refuse the layer; tier-3 *with* the hash decode it. Verified
+  by `test_p4_pipeline` and `test_p4_segment`. Container paradigm id 4.
 - **Container** (`common/container.c`) — ISOBMFF-style box mux/demux (`ftyp` /
   `moov` + `mvhd` + `uvcm` / `mdat`) wrapping P1 frame bitstreams in one file;
   big-endian, integer-only, bit-exact round-trip (verified by `test_container`).
 
 **Stubs (not yet implemented):**
-- P4 (semantic token) encode/decode pipeline.
-- Neural model inference.
-- P4 is signaled and negotiates correctly but has no decode pipeline in this Tier-1 integer scaffold.
+- Neural model inference (the INR network, semantic tokenizer training, etc.).
+  P3/P4 are implemented as faithful integer scaffolds (coord-hash / coarse token
+  map) so the full signal+negotiate+pipeline wiring is real and tested, but the
+  learned models themselves are not (and are unnecessary for the Tier-1 scaffold).
 
 ## Determinism
 

@@ -7,6 +7,7 @@
 #include "p1.h"
 #include "p2.h"
 #include "p3.h"
+#include "p4.h"
 
 /* Required decode tier per paradigm flag (1..4 -> P1..P4). Mirrors the
  * negotiate.c convention that P1 is tier-1 and the neural paradigms are
@@ -60,7 +61,8 @@ int uvc_encode_segment(const int16_t *const *frames, int nframes, int w, int h,
      * spec GOP model (one base P1 picture + enhancement pictures). */
     int use_p2 = (cfg->paradigm_set & UVC_P2_NEURAL) ? 1 : 0;
     int use_p3 = (cfg->paradigm_set & UVC_P3_INR)    ? 1 : 0;
-    int enh = use_p3 ? 3 : (use_p2 ? 2 : 0);   /* 0 = none, 2 = P2, 3 = P3 */
+    int use_p4 = (cfg->paradigm_set & UVC_P4_SEMANTIC) ? 1 : 0;
+    int enh = use_p4 ? 4 : (use_p3 ? 3 : (use_p2 ? 2 : 0));   /* 0 none, 2 P2, 3 P3, 4 P4 */
 
     /* Encode each frame with its paradigm's pipeline into a scratch buffer. */
     const uint8_t **ptrs = malloc((size_t)nframes * sizeof(*ptrs));
@@ -84,6 +86,9 @@ int uvc_encode_segment(const int16_t *const *frames, int nframes, int w, int h,
         } else if (enh == 3) {
             n = uvc_p3_encode_frame(frames[f], w, h, cfg->scale_fp, bufs[f], (int)(w * h * 2));
             pid = UVC_PARADIGM_P3;
+        } else if (enh == 4) {
+            n = uvc_p4_encode_frame(frames[f], w, h, cfg->scale_fp, bufs[f], (int)(w * h * 2));
+            pid = UVC_PARADIGM_P4;
         } else if (enh == 2) {
             n = uvc_p2_encode_frame(frames[f], w, h, cfg->p2_level, cfg->scale_fp, bufs[f], (int)(w * h * 2));
             pid = UVC_PARADIGM_P2;
@@ -134,18 +139,18 @@ int uvc_decode_segment(const uint8_t *buf, size_t len, int w, int h,
     }
 
     /* Capability negotiation: which paradigms this decoder may materialize.
-     * The Tier-1 scaffold has no neural models, so P3/P4 have no decode
-     * pipeline; P2 (integer wavelet) needs tier>=2 but no model. The negotiation
-     * gate decides per-frame routing. req_tier[i] / model_hash[i] follow the
-     * negotiate API (model_hash 0 == "no model required"). */
+     * P2/P3 need tier>=2 (no model). P4 needs tier>=2 AND the held P4 model
+     * hash (the spec's model-hash gate, §1/§13). A decoder that does not hold
+     * the P4 tokenizer model cannot materialize the semantic layer. */
     uint8_t req_tier[4] = { 1, 2, 2, 2 };
-    uint32_t model_hash[4] = { 0, 0, 0, 0 };
+    uint32_t model_hash[4] = { 0, 0, 0, UVC_P4_MODEL_HASH };
     uint32_t allowed = uvc_negotiate_layers(signaled_set, req_tier, model_hash, cfg);
 
     for (int f = 0; f < dn; f++) {
         uint8_t pid = dpar[f];
         int use_p2 = 0;
         int use_p3 = 0;
+        int use_p4 = 0;
         uint8_t decoded_pid = pid;
 
         if (pid == UVC_PARADIGM_P1) {
@@ -157,13 +162,18 @@ int uvc_decode_segment(const uint8_t *buf, size_t len, int w, int h,
         } else if (pid == UVC_PARADIGM_P3) {
             if (!(allowed & UVC_P3_INR)) return -1;      /* tier<2: cannot decode */
             use_p3 = 1;
+        } else if (pid == UVC_PARADIGM_P4) {
+            /* tier>=2 AND held model hash required (the model-hash gate). */
+            if (!(allowed & UVC_P4_SEMANTIC)) return -1;
+            use_p4 = 1;
         } else {
-            /* P4: no neural pipeline in the Tier-1 scaffold. */
             return -1;
         }
 
         int rc;
-        if (use_p3)
+        if (use_p4)
+            rc = uvc_p4_decode_frame(dframes[f], dlens[f], w, h, 32768, rec[f]);
+        else if (use_p3)
             rc = uvc_p3_decode_frame(dframes[f], dlens[f], w, h, 32768, rec[f]);
         else if (use_p2)
             rc = uvc_p2_decode_frame(dframes[f], dlens[f], w, h, 3, 32768, rec[f]);
