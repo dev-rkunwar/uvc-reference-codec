@@ -742,9 +742,10 @@ container are intentionally stubbed pending the roadmap in issue #1.
 | Selector (`encoder/selector.*`) | Implemented | Q8.8 decision matrix. |
 | **P1 pipeline** (`encoder/p1.*`, `decoder/p1.*`) | **Implemented (round-trip)** | Integer 8×8 DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy (nibble alphabet) → IDCT. Self-test proves bit-exact reconstruction when the signal fits int8. |
 | Tier negotiation (`decoder/negotiate.*`) | Implemented | Stub tier map (LEGACY/ENHANCED/FULL). |
+| **Container** (`common/container.*`) | **Implemented (round-trip)** | ISOBMFF-style box mux/demux (`ftyp`/`moov`+`mvhd`+`uvcm`/`mdat`) wrapping P1 frame bitstreams; big-endian boxes, integer-only. |
 | P2 / P3 / P4 | Stub | Roadmap issue #1. |
-| ISOBMFF container / mux | Stub | Roadmap issue #1. |
 
 Self-tests (`tools/uvctest.c`) cover rANS round-trip + determinism, quant
-round-trip, bitstream round-trip, analyzer+selector, tier negotiation, and the
-**P1 block-transform pipeline** end-to-end. Run `ctest` (or `uvctest` directly).
+round-trip, bitstream round-trip, analyzer+selector, tier negotiation, the
+**P1 block-transform pipeline**, and the **ISOBMFF-style container mux/demux**
+end-to-end. Run `ctest` (or `uvctest` directly).
