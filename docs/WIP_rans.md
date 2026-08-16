@@ -59,7 +59,41 @@ Key functions from https://github.com/rygorous/ryg_rans/blob/master/rans64.h :
   if `x < RANS64_L` { x = (x << 32) | *word++; }
 - `scale_bits = p` (M = 1<<p), `start = cum[s]`, `freq = freq[s]`.
 
-## Current broken state (so you don't trust it)
-`tools/dbg_rans.c` currently holds a hand-rolled 64-bit single-threshold variant that
-STILL mismatches (skewed4/dominant/randcounts). It is scratch only — not in the build
-(CMake globs `common/*.c`, not `tools/*.c`). Replace it per the plan above.
+## Current state (verified)
+- rANS entropy coder: merged (PR #4), full self-test PASS.
+- P2 integer wavelet pipeline: merged (PR #5).
+- **Segment signaling + selector→pipeline wiring: merged (PR #6, see below).**
+
+## Segment signaling + paradigm/tier wiring (PR #6, closes 2 roadmap boxes)
+
+Closes roadmap issue #1 boxes:
+- "Bitstream header/signaling for paradigm + tier"
+- "Per-segment paradigm selection wired through selector → encoder → decoder"
+
+Implemented in `common/segment.c` + `common/segment.h` (auto-globbed into
+`uvc_common`):
+- `uvc_plan_segment()` runs the analyzer/selector to pick the paradigm set +
+  required tier from content + encode targets.
+- `uvc_encode_segment()` encodes each frame with the chosen codec (P2 wavelet
+  or P1 base) and muxes into a container that also writes a `uvsh` signaling
+  header box (paradigm_set u32 + tier u8).
+- `uvc_decode_segment()` demuxes, reads the `uvsh` header, runs
+  `uvc_negotiate_layers()` against the decoder's tier/model config, and routes
+  each frame to the matching pipeline. A frame the decoder cannot satisfy (e.g.
+  a P2 segment on a tier-1 decoder, or any P3/P4 frame since the Tier-1
+  scaffold has no neural pipeline) is REFUSED (per spec §7.3/§1 base-layer
+  fallback) rather than silently mis-decoded.
+
+Container additions (`common/container.c`/`container.h`):
+- `uvc_mux_ex()` writes the `uvsh` box; `uvc_container_find_box()` locates any
+  top-level box by type; `UVC_PARADIGM_P3`/`P4` ids defined.
+
+Self-test `test_segment_pipeline()` (tools/uvctest.c) verifies: plan selects
+P1+P2 for textured/server content (tier==2); the `uvsh` header round-trips the
+signaled set+tier exactly; tier-3 decode reconstructs bit-exactly (MAE=0) and
+routes to P2; tier-1 correctly REFUSES a P2-encoded segment; a P1-only
+(realtime-HW) plan decodes at both tiers.
+
+Scope note: P3 (INR) and P4 (semantic) are signaled and negotiate correctly,
+but this Tier-1 integer scaffold has no neural runtime, so their frames cannot
+be decoded (gate refuses). The wiring for when such pipelines land is in place.

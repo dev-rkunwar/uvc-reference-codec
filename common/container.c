@@ -15,6 +15,10 @@ static uint32_t get_be32(const uint8_t *p) {
            ((uint32_t)p[2] << 8)  | ((uint32_t)p[3] << 0);
 }
 
+/* Forward declaration: defined below, but also used by uvc_container_find_box. */
+static int read_box(const uint8_t *p, const uint8_t *end, uint32_t *type,
+                    const uint8_t **payload, size_t *plen, const uint8_t **next);
+
 /* ---- mux ---- */
 
 int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
@@ -77,6 +81,104 @@ int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
     }
 
     return pos;
+}
+
+/* Extended mux: same as uvc_mux but also writes a `uvsh` signaling header box
+ * carrying the segment-level paradigm set (bitmask) and tier. This is the
+ * normative per-segment signaling (roadmap box: "Bitstream header/signaling for
+ * paradigm + tier"). paradigms[] is still written to the uvcm box as before.
+ * Returns total bytes written, or -1 on overflow. */
+int uvc_mux_ex(const uint8_t **frames, const int *frame_len, int nframes,
+               int w, int h, const uint8_t *paradigms, uint32_t paradigm_set,
+               uint8_t tier, uint8_t *out, int cap) {
+    if (nframes < 0 || w <= 0 || h <= 0) return -1;
+    int pos = 0;
+
+    /* ftyp: brand 'UVC1' + minor_version (0) */
+    {
+        uint8_t payload[8];
+        put_be32(payload + 0, UVC_BRAND_FTYP);
+        put_be32(payload + 4, 0);
+        int box = 8 + 8;
+        if (pos + box > cap) return -1;
+        put_be32(out + pos, (uint32_t)box); put_be32(out + pos + 4, 0x66747970u); /* 'ftyp' */
+        memcpy(out + pos + 8, payload, 8);
+        pos += box;
+    }
+
+    /* uvsh: signaling header — paradigm_set (u32, big-endian) + tier (u8). */
+    {
+        uint8_t pl[5];
+        put_be32(pl + 0, paradigm_set);
+        pl[4] = tier;
+        int box = (int)sizeof(pl) + 8;
+        if (pos + box > cap) return -1;
+        put_be32(out + pos, (uint32_t)box); put_be32(out + pos + 4, 0x75767368u); /* 'uvsh' */
+        memcpy(out + pos + 8, pl, sizeof(pl));
+        pos += box;
+    }
+
+    /* moov: mvhd (w,h,nframes) + uvcm (per-frame paradigm map) */
+    {
+        uint8_t mvhd[12];
+        put_be32(mvhd + 0, (uint32_t)w);
+        put_be32(mvhd + 4, (uint32_t)h);
+        put_be32(mvhd + 8, (uint32_t)nframes);
+        int mvhd_box = 12 + 8;
+
+        /* uvcm: for each frame, a paradigm byte (1 = P1, 2 = P2, ...). Padded
+         * to a 4-byte boundary. Default is P1 when paradigms == NULL. */
+        int uvcm_payload = nframes;             /* 1 byte per frame */
+        int pad = (4 - (uvcm_payload & 3)) & 3;
+        int uvcm_box = (uvcm_payload + pad) + 8;
+
+        int moov_box = mvhd_box + uvcm_box + 8;
+        if (pos + moov_box > cap) return -1;
+        int moov_pos = pos;
+        put_be32(out + pos, (uint32_t)moov_box); put_be32(out + pos + 4, 0x6d6f6f76u); /* 'moov' */
+        pos += 8;
+        put_be32(out + pos, (uint32_t)mvhd_box); put_be32(out + pos + 4, 0x6d766864u); /* 'mvhd' */
+        memcpy(out + pos + 8, mvhd, 12); pos += mvhd_box;
+        put_be32(out + pos, (uint32_t)uvcm_box); put_be32(out + pos + 4, 0x7576636du); /* 'uvcm' */
+        for (int i = 0; i < nframes; i++)
+            out[pos + 8 + i] = paradigms ? paradigms[i] : UVC_PARADIGM_P1;
+        pos += uvcm_box;
+        (void)moov_pos;
+    }
+
+    /* mdat: concatenated frame bitstreams, each length-prefixed (u32) */
+    {
+        int mdat_payload = 0;
+        for (int i = 0; i < nframes; i++) mdat_payload += 4 + frame_len[i];
+        int mdat_box = mdat_payload + 8;
+        if (pos + mdat_box > cap) return -1;
+        put_be32(out + pos, (uint32_t)mdat_box); put_be32(out + pos + 4, 0x6d646174u); /* 'mdat' */
+        pos += 8;
+        for (int i = 0; i < nframes; i++) {
+            put_be32(out + pos, (uint32_t)frame_len[i]); pos += 4;
+            memcpy(out + pos, frames[i], (size_t)frame_len[i]); pos += frame_len[i];
+        }
+    }
+
+    return pos;
+}
+
+int uvc_container_find_box(const uint8_t *buf, size_t len, uint32_t type,
+                           const uint8_t **out_payload, size_t *out_len) {
+    const uint8_t *p = buf;
+    const uint8_t *end = buf + len;
+    uint32_t t; const uint8_t *pl; size_t plen; const uint8_t *nx;
+    if (out_payload) *out_payload = NULL;
+    if (out_len) *out_len = 0;
+    while (read_box(p, end, &t, &pl, &plen, &nx) == 0) {
+        if (t == type) {
+            if (out_payload) *out_payload = pl;
+            if (out_len) *out_len = plen;
+            return 1;
+        }
+        p = nx;
+    }
+    return 0;
 }
 
 /* ---- demux ---- */

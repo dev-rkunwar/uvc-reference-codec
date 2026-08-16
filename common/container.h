@@ -18,13 +18,31 @@
 #define UVC_BRAND_FTYP 0x55766331u   /* 'UVC1' */
 #define UVC_PARADIGM_P1 1
 #define UVC_PARADIGM_P2 2
+#define UVC_PARADIGM_P3 3
+#define UVC_PARADIGM_P4 4
+
+/* Locate a top-level box by type in a parsed container buffer. Returns the
+ * payload pointer and length, or (NULL,0) if absent. Used to assert the
+ * signaling header is present end-to-end. */
+int uvc_container_find_box(const uint8_t *buf, size_t len,
+                           uint32_t type, const uint8_t **out_payload,
+                           size_t *out_len);
 
 /* Mux: pack nframes bitstreams (frames[i] of frame_len[i] bytes) plus the
  * picture dimensions (w,h) and a per-frame paradigm map into one container
  * buffer. Returns total bytes written, or -1 on overflow. `paradigms` may be
  * NULL (all frames default to UVC_PARADIGM_P1); otherwise it holds nframes ids. */
+/* Mux (legacy): no signaling header — used by existing tests. */
 int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
             int w, int h, const uint8_t *paradigms, uint8_t *out, int cap);
+
+/* Mux (extended): writes a `uvsh` signaling header carrying the segment-level
+ * paradigm_set (bitmask) and tier, in addition to the per-frame uvcm map. This
+ * is the normative per-segment signaling (roadmap: bitstream header/signaling
+ * for paradigm + tier). Returns total bytes, or -1 on overflow. */
+int uvc_mux_ex(const uint8_t **frames, const int *frame_len, int nframes,
+               int w, int h, const uint8_t *paradigms, uint32_t paradigm_set,
+               uint8_t tier, uint8_t *out, int cap);
 
 /* Demux: parse a container buffer. Sets *w,*h,*nframes. If out_frames /
  * out_lens are non-NULL (each sized >= nframes), they receive pointers into buf
