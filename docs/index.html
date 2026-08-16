@@ -561,11 +561,12 @@ int  uvc_decoder_pull_task(uvc_decoder*, uint16_t task_id, float* feat, int* dim
 <p>| Selector (<code>encoder/selector.*</code>) | Implemented | Q8.8 decision matrix. |</p>
 <p>| <strong>P1 pipeline</strong> (<code>encoder/p1.<em></code>, <code>decoder/p1.</em></code>) | <strong>Implemented (round-trip)</strong> | Integer 8×8 DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy (nibble alphabet) → IDCT. Self-test proves bit-exact reconstruction when the signal fits int8. |</p>
 <p>| Tier negotiation (<code>decoder/negotiate.*</code>) | Implemented | Stub tier map (LEGACY/ENHANCED/FULL). |</p>
+<p>| <strong>Container</strong> (<code>common/container.*</code>) | <strong>Implemented (round-trip)</strong> | ISOBMFF-style box mux/demux (<code>ftyp</code>/<code>moov</code>+<code>mvhd</code>+<code>uvcm</code>/<code>mdat</code>) wrapping P1 frame bitstreams; big-endian boxes, integer-only. |</p>
 <p>| P2 / P3 / P4 | Stub | Roadmap issue #1. |</p>
-<p>| ISOBMFF container / mux | Stub | Roadmap issue #1. |</p>
 <p>Self-tests (<code>tools/uvctest.c</code>) cover rANS round-trip + determinism, quant</p>
-<p>round-trip, bitstream round-trip, analyzer+selector, tier negotiation, and the</p>
-<p><strong>P1 block-transform pipeline</strong> end-to-end. Run <code>ctest</code> (or <code>uvctest</code> directly).</p>
+<p>round-trip, bitstream round-trip, analyzer+selector, tier negotiation, the</p>
+<p><strong>P1 block-transform pipeline</strong>, and the <strong>ISOBMFF-style container mux/demux</strong></p>
+<p>end-to-end. Run <code>ctest</code> (or <code>uvctest</code> directly).</p>
 
   <li><a href="#universal-video-codec-uvc-implementation-specification">Universal Video Codec (UVC) — Implementation Specification</a></li>
   <li><a href="#0-scope-and-introduction">0. Scope and Introduction</a></li>

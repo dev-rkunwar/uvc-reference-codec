@@ -6,6 +6,7 @@
 #include "selector.h"
 #include "negotiate.h"
 #include "p1.h"
+#include "container.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -196,6 +197,66 @@ static void test_p1_pipeline(void) {
     free(orig); free(rec); free(bit);
 }
 
+/* ---------- Container mux/demux round-trip (spec §2/§3) ---------- */
+static void test_container(void) {
+    printf("[test] ISOBMFF-style container mux/demux (P1 frames)\n");
+    const int W = 32, H = 32, NFR = 4;
+    uint16_t scale = 32768;
+
+    /* Encode NFR frames individually into separate bitstreams. */
+    int16_t *orig[NFR];
+    uint8_t *enc[NFR];
+    int enc_len[NFR];
+    for (int f = 0; f < NFR; f++) {
+        orig[f] = malloc((size_t)W * H * sizeof(int16_t));
+        enc[f]  = malloc((size_t)W * H * 2);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                orig[f][y * W + x] = (int16_t)(((x * 5 + y * 3 + f * 7) & 15));
+        enc_len[f] = uvc_p1_encode_frame(orig[f], W, H, scale, enc[f], (int)(W * H * 2));
+        CHECK(enc_len[f] > 0, "container: frame encode ok");
+    }
+
+    /* Mux into one container buffer. */
+    const uint8_t *ptrs[NFR];
+    for (int f = 0; f < NFR; f++) ptrs[f] = enc[f];
+    uint8_t *cont = malloc(1 << 20);
+    int clen = uvc_mux(ptrs, enc_len, NFR, W, H, cont, 1 << 20);
+    CHECK(clen > 0, "container: mux produced bytes");
+    printf("    muxed %d frames (%dx%d) -> %d bytes\n", NFR, W, H, clen);
+
+    /* Demux: recover frame pointers + lengths (into the container buffer). */
+    int dw = 0, dh = 0, dn = 0;
+    const uint8_t *dframes[NFR];
+    int dlens[NFR];
+    int got = uvc_demux(cont, (size_t)clen, &dw, &dh, &dn, dframes, dlens);
+    CHECK(got == NFR, "container: demux frame count");
+    CHECK(dw == W && dh == H, "container: demux dims match");
+    if (got != NFR) { for (int f = 0; f < NFR; f++) { free(orig[f]); free(enc[f]); } free(cont); return; }
+
+    /* Decode each demuxed frame and compare to its original. */
+    int allok = 1;
+    for (int f = 0; f < NFR; f++) {
+        CHECK(dlens[f] == enc_len[f], "container: frame length preserved");
+        int16_t *rec = malloc((size_t)W * H * sizeof(int16_t));
+        int rc = uvc_p1_decode_frame(dframes[f], dlens[f], W, H, scale, rec);
+        CHECK(rc == 0, "container: frame decode ok");
+        long mae = 0; int worst = 0;
+        for (int i = 0; i < W * H; i++) {
+            int d = abs((int)rec[i] - (int)orig[f][i]);
+            mae += d; if (d > worst) worst = d;
+        }
+        mae /= (W * H);
+        if (mae > 8 || rc != 0) allok = 0;
+        free(rec);
+        printf("    frame %d: %d bytes, MAE=%ld (worst=%d)\n", f, dlens[f], mae, worst);
+    }
+    CHECK(allok, "container: all frames reconstruct bit-exact");
+
+    for (int f = 0; f < NFR; f++) { free(orig[f]); free(enc[f]); }
+    free(cont);
+}
+
 int main(void) {
     printf("=== UVC reference scaffold self-test ===\n");
     test_rans();
@@ -204,6 +265,7 @@ int main(void) {
     test_analyze_select();
     test_negotiate();
     test_p1_pipeline();
+    test_container();
     printf("=== %s (%d failures) ===\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

@@ -18,12 +18,14 @@ See [`UVC_Specification.md`](./UVC_Specification.md) for the full design
 | Build (CMake + C11, MinGW / gcc / clang) | ✅ |
 | Self-test (`uvctest`) — all subsystems | ✅ PASS (0 failures) |
 | **P1 block-transform pipeline (DCT+quant+entropy round-trip)** | ✅ |
+| **Container (ISOBMFF-style mux/demux of P1 frames)** | ✅ |
 | CI (GitHub Actions, Windows + Linux) | ✅ see `.github/workflows/ci.yml` |
 
 The self-test verifies deterministic round-trips for the entropy coder,
 quantizer, bitstream reader/writer, analyzer+selector, decoder tier
-negotiation, **and the full P1 encode→decode pipeline** (8×8 integer DCT →
-INT8 quant → entropy → IDCT, bit-exact when the signal fits the quantizer).
+negotiation, **the full P1 encode→decode pipeline** (8×8 integer DCT →
+INT8 quant → entropy → IDCT, bit-exact when the signal fits the quantizer),
+**and the ISOBMFF-style container** mux/demux of P1 frames (bit-exact).
 
 ## Build
 
@@ -54,7 +56,7 @@ Expected output ends with:
 ## Project layout
 
 ```
-common/      Codec primitives (spec §6 entropy, §12 bitstream, §3 quantize, §9 P1 DCT)
+common/      Codec primitives (spec §6 entropy, §12 bitstream, §3 quantize, §9 P1 DCT, §2 container)
 encoder/     analyzer.c (complexity heuristic), selector.c (paradigm choice), p1.c (DCT+quant+entropy)
 decoder/     negotiate.c (tier negotiation), p1.c (P1 decode pipeline)
 tools/       uvctest.c — self-test / conformance harness
@@ -78,10 +80,13 @@ UVC_Specification.md   Full design specification
   complexity heuristic.
 - Selector — paradigm decision matrix over the analyzer output.
 - Negotiate — decoder tier/capability negotiation stub.
+- **Container** (`common/container.c`) — ISOBMFF-style box mux/demux (`ftyp` /
+  `moov` + `mvhd` + `uvcm` / `mdat`) wrapping P1 frame bitstreams in one file;
+  big-endian, integer-only, bit-exact round-trip (verified by `test_container`).
 
 **Stubs (not yet implemented):**
 - P2–P4 encode/decode pipelines (wavelet, learned/neural residual, neural generative).
-- Neural model inference and the ISOBMFF-style container / muxing.
+- Neural model inference.
 - The normative integer rANS coder (§6.2) — currently the Huffman placeholder.
 
 ## Determinism
