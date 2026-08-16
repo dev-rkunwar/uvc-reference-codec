@@ -9,7 +9,9 @@ buildable, verifiable, bit-exact primitives with a passing self-test, while the
 full encode/decode pipelines and neural models are stubs (see Scope below).
 
 See [`UVC_Specification.md`](./UVC_Specification.md) for the full design
-(§0–§20).
+(§0–§20), and [`docs/ROADMAP.md`](./docs/ROADMAP.md) for the current
+implementation status mapped to the spec's priority plan and proposed next
+milestones.
 
 ## Status
 
