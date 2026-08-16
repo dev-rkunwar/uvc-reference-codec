@@ -76,6 +76,13 @@ UVC_Specification.md   Full design specification
   32-bit byte variant, which requires every frequency F ≥ M/256 and would desync
   on the peaked DCT-magnitude distributions UVC produces). Bit-exact and
   deterministic across platforms (little-endian 32-bit words).
+- P2 wavelet pipeline — an integer **LeGall 5/3** 2D discrete wavelet transform
+  (`common/p2.c`, `encoder/p2.c`, `decoder/p2.c`). The transform is lossless
+  (inverse is the exact inverse, adjoint error = 0 LSB). Per-level decomposition
+  of the whole frame, INT8 quantization, then the same rANS entropy coder used by
+  P1. Bit-exact reconstruction when the signal fits the quantizer (verified by
+  `test_p2_pipeline`). The container labels each frame's paradigm in the `uvcm`
+  box (1 = P1, 2 = P2).
 - Quantizer — INT8 / INT4 scalar quantization with round-trip + clamping.
 - Bitstream — bit-exact `bw_put` / `br_get` writer/reader (64-bit accumulator,
   multi-byte safe).
@@ -88,9 +95,9 @@ UVC_Specification.md   Full design specification
   big-endian, integer-only, bit-exact round-trip (verified by `test_container`).
 
 **Stubs (not yet implemented):**
-- P2–P4 encode/decode pipelines (wavelet, learned/neural residual, neural generative).
+- P3 (INR) and P4 (semantic token) encode/decode pipelines.
 - Neural model inference.
-- The rANS coder is implemented; remaining work is the P2–P4 neural paradigms.
+- P2 is implemented as an integer wavelet pipeline; remaining work is the P3/P4 neural paradigms.
 
 ## Determinism
 

@@ -13,12 +13,12 @@ file(GLOB UVC_COMMON common/*.c)
 add_library(uvc_common STATIC ${UVC_COMMON})
 target_include_directories(uvc_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
-# ---- Encoder pieces (spec §9 analyzer, §10 selector, §9 P1 pipeline) ----
-add_library(uvc_enc STATIC encoder/analyzer.c encoder/selector.c encoder/p1.c)
+# ---- Encoder pieces (spec §9 analyzer, §10 selector, §9 P1/P2 pipeline) ----
+add_library(uvc_enc STATIC encoder/analyzer.c encoder/selector.c encoder/p1.c encoder/p2.c)
 target_link_libraries(uvc_enc uvc_common)
 
-# ---- Decoder pieces (spec §1 tier negotiation, §9 P1 pipeline) ----
-add_library(uvc_dec STATIC decoder/negotiate.c decoder/p1.c)
+# ---- Decoder pieces (spec §1 tier negotiation, §9 P1/P2 pipeline) ----
+add_library(uvc_dec STATIC decoder/negotiate.c decoder/p1.c decoder/p2.c)
 target_link_libraries(uvc_dec uvc_common)
 
 # ---- Self-test / conformance binary ----

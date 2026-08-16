@@ -18,7 +18,7 @@ static uint32_t get_be32(const uint8_t *p) {
 /* ---- mux ---- */
 
 int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
-            int w, int h, uint8_t *out, int cap) {
+            int w, int h, const uint8_t *paradigms, uint8_t *out, int cap) {
     if (nframes < 0 || w <= 0 || h <= 0) return -1;
     int pos = 0;
 
@@ -42,7 +42,8 @@ int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
         put_be32(mvhd + 8, (uint32_t)nframes);
         int mvhd_box = 12 + 8;
 
-        /* uvcm: for each frame, a paradigm byte (1 = P1). Padded to 4-byte. */
+        /* uvcm: for each frame, a paradigm byte (1 = P1, 2 = P2, ...). Padded
+         * to a 4-byte boundary. Default is P1 when paradigms == NULL. */
         int uvcm_payload = nframes;             /* 1 byte per frame */
         int pad = (4 - (uvcm_payload & 3)) & 3;
         int uvcm_box = (uvcm_payload + pad) + 8;
@@ -55,7 +56,8 @@ int uvc_mux(const uint8_t **frames, const int *frame_len, int nframes,
         put_be32(out + pos, (uint32_t)mvhd_box); put_be32(out + pos + 4, 0x6d766864u); /* 'mvhd' */
         memcpy(out + pos + 8, mvhd, 12); pos += mvhd_box;
         put_be32(out + pos, (uint32_t)uvcm_box); put_be32(out + pos + 4, 0x7576636du); /* 'uvcm' */
-        for (int i = 0; i < nframes; i++) out[pos + 8 + i] = 1;  /* paradigm P1 */
+        for (int i = 0; i < nframes; i++)
+            out[pos + 8 + i] = paradigms ? paradigms[i] : UVC_PARADIGM_P1;
         pos += uvcm_box;
         (void)moov_pos;
     }
@@ -93,11 +95,12 @@ static int read_box(const uint8_t *p, const uint8_t *end, uint32_t *type,
 }
 
 int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
-              const uint8_t **out_frames, int *out_lens) {
+              const uint8_t **out_frames, int *out_lens, uint8_t *out_par) {
     const uint8_t *p = buf;
     const uint8_t *end = buf + len;
     int got_mvhd = 0, got_mdat = 0;
     int mw = 0, mh = 0, mn = 0;
+    const uint8_t *uvcm_pl = NULL; size_t uvcm_len = 0;
 
     uint32_t type; const uint8_t *pl; size_t plen; const uint8_t *nx;
     while (read_box(p, end, &type, &pl, &plen, &nx) == 0) {
@@ -110,8 +113,10 @@ int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
                     mh = (int)get_be32(pl + 4);
                     mn = (int)get_be32(pl + 8);
                     got_mvhd = 1;
+                } else if (type == 0x7576636du) { /* 'uvcm' paradigm map */
+                    uvcm_pl = pl;
+                    uvcm_len = plen;
                 }
-                /* 'uvcm' (paradigm map) parsed but not required for decode */
                 q = nx;
             }
         } else if (type == 0x6d646174u) {        /* 'mdat' */
@@ -134,5 +139,10 @@ int uvc_demux(const uint8_t *buf, size_t len, int *w, int *h, int *nframes,
     if (w) *w = mw;
     if (h) *h = mh;
     if (nframes) *nframes = mn;
+    if (out_par && uvcm_pl) {
+        int n = (uvcm_len > (size_t)mn) ? mn : (int)uvcm_len;
+        for (int i = 0; i < n; i++) out_par[i] = uvcm_pl[i];
+        for (int i = n; i < mn; i++) out_par[i] = UVC_PARADIGM_P1;
+    }
     return mn;
 }
