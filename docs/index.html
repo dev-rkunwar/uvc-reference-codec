@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UVC — Universal Video Codec Specification</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+         max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #1b1f24; }
+  @media (prefers-color-scheme: dark) { body { color: #d6dde6; background: #0d1117; } a { color: #79c0ff; } code,pre { background:#161b22; } }
+  h1,h2,h3 { line-height: 1.25; }
+  h1 { border-bottom: 2px solid #8883; padding-bottom: .3rem; }
+  h2 { border-bottom: 1px solid #8882; padding-bottom: .2rem; margin-top: 2.2rem; }
+  h3 { margin-top: 1.6rem; }
+  code { background: #8881; padding: .1em .35em; border-radius: 4px; font-size: 90%; }
+  pre { background: #8881; padding: 1rem; border-radius: 8px; overflow:auto; }
+  pre code { background: none; padding: 0; }
+  a { color: #0969da; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  nav.toc { background:#8881; padding:.8rem 1.2rem; border-radius:8px; margin:1.5rem 0; }
+  nav.toc ul { margin: 0; padding-left: 1.2rem; }
+  nav.toc li { margin: .15rem 0; }
+</style>
+</head>
+<body>
+<h1>UVC — Universal Video Codec Specification</h1>
+<nav class="toc"><strong>Contents</strong><ul>
+
+<a id="universal-video-codec-uvc-implementation-specification"></a><h1>Universal Video Codec (UVC) — Implementation Specification</h1>
+<p><strong>Version:</strong> 0.1.0-draft</p>
+<p><strong>Date:</strong> 2026-08-16</p>
+<p><strong>Status:</strong> Implementation-ready design specification</p>
+<p><strong>License target:</strong> Apache-2.0 (reference), implementer-friendly</p>
+<p><strong>Model identity note:</strong> This draft was authored under OpenCode Zen (hy3-free). All field layouts below are normative.</p>
+<p>---</p>
+<a id="0-scope-and-introduction"></a><h2>0. Scope and Introduction</h2>
+<p>UVC is a <strong>unified, content-adaptive, multi-paradigm video coding framework</strong>, not a single</p>
+<p>algorithm. A single UVC bitstream carries one or more <em>coding layers</em>. Each layer is produced by</p>
+<p>exactly one of four coding paradigms. The decoder selects, per device capability, which layers it</p>
+<p>materializes.</p>
+<p>The four paradigms are:</p>
+<p>| ID | Paradigm | Purpose | Decode tier |</p>
+<p>|----|----------|---------|-------------|</p>
+<p>| P1 | Traditional++ | Block-based hybrid (VVC/HEVC/AV1 + neural in-loop) | Tier 1 (HW) |</p>
+<p>| P2 | Neural Residual | Conditional residual NVC (DCVC-MB family) | Tier 2 (NPU/GPU) |</p>
+<p>| P3 | Implicit Neural (INR) | Neural representation (MNeRV family) | Tier 2+ (parallel MLP) |</p>
+<p>| P4 | Semantic / Task | Machine-vision scalable layer (VCM/PAT-VCM) | Tier 2+ (NPU) |</p>
+<p><strong>Design goals (normative targets):</strong></p>
+<p>- Decode <em>any</em> UVC bitstream on Tier-1 hardware (base layer only, no neural compute).</p>
+<p>- Best-in-class RD for the active tier: P1+P2 targets 40–50% bitrate reduction vs VVC at equal quality.</p>
+<p>- Single bitstream serves human viewing AND machine analytics (scalable layers).</p>
+<p>- Cross-platform <strong>bit-exact</strong> decode (fixed-point reference + conformance vectors).</p>
+<p>- Graceful degradation: missing model → decode base layer only.</p>
+<p>This document is the authoritative source for implementers. Companion artifacts (conformance</p>
+<p>vectors, reference model skeleton) are referenced by path in §17.</p>
+<p>---</p>
+<a id="1-normative-conformance-levels-decoder-tiers"></a><h2>1. Normative Conformance Levels (Decoder Tiers)</h2>
+<pre><code>Tier 1  LEGACY      P1 only. MUST decode base layer. HW VVC/HEVC/AV1 decoder.
+                   ZERO neural compute. Browser/TV/IoT.
+Tier 2  ENHANCED   P1 + P2 (+ optional P3/P4 if NPU present).
+                   NPU/DSP/GPU, &gt;=2 TOPS INT8. Mixed precision INT8/INT16.
+Tier 3  FULL       P1 + P2 + P3 + P4. GPU FP16/BF16, &gt;=50 TOPS.
+                   Generative INR, semantic analytics, volumetric.</code></pre>
+<p>Every decoder SHALL advertise its tier and the set of model hashes it holds in the</p>
+<p><code>uvcC</code> configuration box (§4.3). An encoder SHALL only emit a layer whose required tier exceeds</p>
+<p>the <em>lowest common denominator</em> of the target audience if the base layer remains independently</p>
+<p>decodable.</p>
+<p>---</p>
+<a id="2-bitstream-container-isobmff"></a><h2>2. Bitstream Container (ISOBMFF)</h2>
+<p>UVC uses ISO Base Media File Format (ISO/IEC 14496-12) with UVC-specific boxes. The major brand</p>
+<p>is <code>uvc1</code>. Compatible brands MUST include at least one traditional brand for legacy players:</p>
+<p><code>avc1</code>, <code>hev1</code>, <code>hvc1</code>, <code>av01</code>.</p>
+<a id="2-1-box-tree"></a><h3>2.1 Box tree</h3>
+<pre><code>ftyp (major=uvc1, compatible=hev1,av01,...)
+moov
+  mvhd
+  trak                          &lt;- base layer track (P1, traditional NALUs)
+    tkhd, mdia, minf, stbl
+  trak                          &lt;- enhancement track group (P2/P3/P4)
+    tkhd, mdia, minf, stbl
+      stsd
+        uvcE                    &lt;- UVC enhancement sample entry
+  uvcC                          &lt;- UVC configuration (capability advertisement)
+  uvcm                          &lt;- paradigm map (per-GOP layer assignment)
+mdat                          &lt;- interleaved samples</code></pre>
+<a id="2-2-uvce-enhancement-sample-entry-stsd-child"></a><h3>2.2 <code>uvcE</code> enhancement sample entry (stsd child)</h3>
+<pre><code>class UVCEnhancementSampleEntry extends VisualSampleEntry {
+  unsigned int(8)  paradigm_mask;        // bit0=P2, bit1=P3, bit2=P4
+  unsigned int(8)  layer_count;
+  for (i=0; i&lt;layer_count; i++) {
+    unsigned int(8)  paradigm_id;        // 2,3,4
+    unsigned int(8)  required_tier;      // 1..3
+    unsigned int(32) model_hash;        // FNV-1a of model weights
+    unsigned int(16) model_patch_version;// semantic MAJOR.MINOR
+  }
+}</code></pre>
+<a id="2-3-uvcc-configuration-box"></a><h3>2.3 <code>uvcC</code> configuration box</h3>
+<pre><code>class UVCDecoderConfigBox extends FullBox('uvcC', 0, 0) {
+  unsigned int(8)  spec_version_major;
+  unsigned int(8)  spec_version_minor;
+  unsigned int(8)  spec_version_patch;
+  unsigned int(8)  min_decoder_tier;     // minimum tier to decode anything
+  unsigned int(16) flags;                 // bit0: deterministic_int_only
+  unsigned int(8)  entropy_coding_id;     // 0=CABAC,1=rANS,2=learned-AR
+  unsigned int(16) max_picture_width;
+  unsigned int(16) max_picture_height;
+  unsigned int(8)  chroma_format;         // 0=400,1=420,2=422,3=444
+  unsigned int(8)  bit_depth;             // 8 or 10
+}</code></pre>
+<p>---</p>
+<a id="3-sample-nalu-structure"></a><h2>3. Sample / NALU Structure</h2>
+<a id="3-1-picture-timing-model"></a><h3>3.1 Picture timing model</h3>
+<p>A <strong>GOP</strong> (Group of Pictures) in UVC is the unit of paradigm assignment. The <code>uvcm</code> box maps each</p>
+<p>GOP index to a <code>(paradigm_set, bit_budget_split)</code> tuple. Within a GOP:</p>
+<p>- Exactly one <strong>base picture</strong> (P1), decodable standalone.</p>
+<p>- Zero or more <strong>enhancement pictures</strong> (P2 residual / P3 weights / P4 tokens).</p>
+<a id="3-2-uvc-nalu-header-p2-p3-p4-payloads"></a><h3>3.2 UVC NALU header (P2/P3/P4 payloads)</h3>
+<pre><code>nal_unit_header {
+  forbidden_zero_bit   u(1) = 0
+  nal_layer_id        u(6)   // 0=base(P1), 1=P2, 2=P3, 3=P4
+  nal_type            u(3)   // 0=IDR,1=inter,2=param,3=model,4=token
+  temporal_id         u(3)
+  reserved            u(3) = 0
+}</code></pre>
+<a id="3-3-layer-dependency-rule"></a><h3>3.3 Layer dependency rule</h3>
+<pre><code>Layer 0 (P1) : no dependency. MUST be present.
+Layer 1 (P2) : depends on Layer 0 of same picture + referenced P1 pictures.
+Layer 2 (P3) : self-contained weights + frame index table; independent of P1.
+Layer 3 (P4) : depends on Layer 0 (base pixels) for human view; machine view
+               independent if base pixels reconstructed from P4 tokens alone.</code></pre>
+<p>---</p>
+<a id="4-paradigm-p1-traditional-enhanced-vvc-base"></a><h2>4. Paradigm P1 — Traditional++ (Enhanced VVC base)</h2>
+<a id="4-1-encoder-pipeline-normative-block-order"></a><h3>4.1 Encoder pipeline (normative block order)</h3>
+<pre><code>Input YUV (bit_depth B, chroma C)
+  -&gt; CTU partition: QTMT + NN-guided split (§4.4)
+  -&gt; Intra/Inter prediction (VVC tools: MRL, Affine, SbTMVP, GPM)
+  -&gt; Residual
+  -&gt; Transform (MTS) + Quant (perceptual QP offset, §4.5)
+  -&gt; Entropy: CABAC (entropy-conserving binarization, §6.1)
+  -&gt; In-loop: Deblock -&gt; SAO -&gt; ALF -&gt; CCALF -&gt; Neural-ALF (§4.6)
+  -&gt; Reconstructed frame buffer</code></pre>
+<a id="4-2-neural-in-loop-filter-neural-alf"></a><h3>4.2 Neural in-loop filter (Neural-ALF)</h3>
+<p>Replace/extend VVC ALF with a lightweight CNN:</p>
+<pre><code>NeuralALF {
+  input:  reconstructed luma (7x7 window) + QP + slice type (one-hot)
+  arch:   3 conv layers, 16/32/3 channels, 3x3, ReLU, residual
+  params: ~12k floats -&gt; INT8 (per-sequence, sent in param NALU)
+  compute: applied per CTU, fused with CCALF
+}</code></pre>
+<p>Reference: VVC neural in-loop filtering [2607.05737, 2607.12186]; DLF survey [2607.16319].</p>
+<a id="4-3-perceptual-bit-allocation"></a><h3>4.3 Perceptual bit allocation</h3>
+<p>Per-frame QP offset derived from a learned JND map:</p>
+<pre><code>qp_offset(pixel_block) = round( lambda * (1 - JND_confidence(block)) )
+// JND_confidence in [0,1], from a tiny saliency net (MobileNetV3-SSIM head)</code></pre>
+<p>Reference: bit-allocation transfer / perceptual RDO [2608.07799].</p>
+<a id="4-4-nn-guided-ctu-split-optional-encoder-only"></a><h3>4.4 NN-guided CTU split (optional, encoder-only)</h3>
+<p>A 2-class MLP proposes split/merge at QTMT node; final decision still RDO-closed</p>
+<p>(RD cost MUST be computed; NN is a candidate generator only, never changes decoded bits).</p>
+<a id="4-5-quantization"></a><h3>4.5 Quantization</h3>
+<p>Standard VVC quantizer. QP range 0..63. Perceptual offset clamped to [-8, +8].</p>
+<a id="4-6-determinism"></a><h3>4.6 Determinism</h3>
+<p>P1 decode is integer-exact by construction (VVC fixed-point). No floating point in the</p>
+<p>decoder path. Compliant with VVC/H.266 fixed-point spec.</p>
+<p>---</p>
+<a id="5-paradigm-p2-neural-residual-conditional-nvc"></a><h2>5. Paradigm P2 — Neural Residual (Conditional NVC)</h2>
+<a id="5-1-encoder-architecture-dcvc-mb-family"></a><h3>5.1 Encoder architecture (DCVC-MB family)</h3>
+<pre><code>For each frame t (except IDR):
+  mv_hat, mv_latent  = MotionEncoder( ref_frames, feature_prev )
+  mv_latent_q        = Quantize( mv_latent, q_step_mv )
+  mv_refined         = MVRefinement( mv_hat, MultiHypothesis(refs) )
+  res                = Frame_t - Warp( ref, mv_refined )
+  ctx                = ContextFusion( features, SSM/Mamba state )
+  res_latent         = ResidualEncoder( res, ctx )
+  res_latent_q       = Quantize( res_latent, q_step_res )
+  # Autoregressive context (MoE gating) for entropy
+  z_hat              = AutoregressiveContext( res_latent_q )   # decoder-side model
+  bits               = EntropyModel( res_latent_q | z_hat, mv_latent_q )</code></pre>
+<p>Reference: DCVC [CVPR'22]; DCVC-MB (Mamba B-frame) [2607.14305];</p>
+<p>multi-hypothesis [2510.12479]; MoE context [2608.10947].</p>
+<a id="5-2-cross-platform-deterministic-quantization-normative"></a><h3>5.2 Cross-platform deterministic quantization (NORMATIVE)</h3>
+<p>To guarantee bit-exact decode across x86/ARM/GPU/ASIC:</p>
+<pre><code>1. ALL tensor ops in P2 decoder are FIXED-POINT (Qm.n, integer-only).
+2. Model weights: INT8 symmetric per-channel, scale stored as INT16 fixed-point.
+3. Activations: INT16. Accumulators: INT32.
+4. Entropy coder: rANS with 31-bit state, fixed LUT tables (§6.2).
+5. NO LayerNorm/Softmax in float; use integer power-iteration approximations.
+6. Rounding: stochastic during TRAINING ONLY; inference uses round-half-to-even.</code></pre>
+<p>Reference: MLVC cross-platform [2606.28027]; Streamable NVC determinism [2608.00483];</p>
+<p>JOMP mixed-precision [2606.13110].</p>
+<a id="5-3-quantization-schedule-jomp"></a><h3>5.3 Quantization schedule (JOMP)</h3>
+<p>Joint optimization of mixed-precision per layer. Stored as a 1-byte precision map per model</p>
+<p>(0=INT4,1=INT8,2=INT16). Sent in model NALU (§3.2 type=3).</p>
+<a id="5-4-decode-tier-2"></a><h3>5.4 Decode (Tier 2)</h3>
+<pre><code>mv_latent_q -&gt; MVDecoder -&gt; mv_hat -&gt; Warp(ref) -&gt; pred
+res_latent_q -&gt; EntModel -&gt; res_hat
+recon = pred + res_hat  (INT16, clipped to [0, (1&lt;&lt;B)-1])
+optional: Neural-ALF refinement (shared with P1)</code></pre>
+<a id="5-5-complexity-budget"></a><h3>5.5 Complexity budget</h3>
+<p>P2 encode: 10–50× VVC (cloud/server only). P2 decode: 2–8 ms/frame 1080p on 4 TOPS NPU.</p>
+<p>---</p>
+<a id="6-entropy-coding-normative"></a><h2>6. Entropy Coding (normative)</h2>
+<a id="6-1-p1-cabac"></a><h3>6.1 P1: CABAC</h3>
+<p>Standard VVC CABAC. No change. Binarization uses entropy-conserving transform coding</p>
+<p>[2606.23753] (optional tool, signaled in slice header).</p>
+<a id="6-2-p2-p3-p4-rans-range-asymmetric-numeral-system"></a><h3>6.2 P2/P3/P4: rANS (range asymmetric numeral system)</h3>
+<pre><code>rANS state: uint32, 31-bit modulus (R = 1&lt;&lt;23 typical)
+encoder:
+  push(state, sym):
+    freq = CDF[sym+1] - CDF[sym]
+    state = (state / freq) * RANGE + (state % freq) + CDF[sym]
+    while state &gt;= 1&lt;&lt;31: emit(state &amp; 0xFF); state &gt;&gt;= 8
+decoder:
+  sym = search(CDF, state % RANGE)
+  state = (state / RANGE) * freq + (state % RANGE) - CDF[sym]
+  while state &lt; RANGE: state = (state&lt;&lt;8) | getbyte()</code></pre>
+<p>CDF tables: learned, sent per-GOP in param NALU (max 1 KB). All arithmetic integer-only.</p>
+<a id="6-3-p4-semantic-tokens-variable-length-rans"></a><h3>6.3 P4 semantic tokens: variable-length + rANS</h3>
+<p>Task tokens use the same rANS with task-specific CDF.</p>
+<p>---</p>
+<a id="7-paradigm-p3-implicit-neural-representation-inr"></a><h2>7. Paradigm P3 — Implicit Neural Representation (INR)</h2>
+<a id="7-1-encoder-mnerv-family-per-video-overfit"></a><h3>7.1 Encoder (MNeRV family, per-video overfit)</h3>
+<pre><code>Video clip (N frames) -&gt;
+  ContentAnalyzer -&gt; INR config (depth, width, embedding dim)
+  Embeddings E[0..N-1]  (per-frame latent vectors)
+  Weight optimization: minimize Σ_t || Decoder(E_t) - Frame_t || + λ*||weights||
+  Low-rank convolution factorization [2603.18261]
+  Progressive layering: L layers; layer k adds detail (§7.3)
+  Weight quantization: HAMP-LIC [2608.12239]</code></pre>
+<p>Reference: NeRV [ECCV'22]; ENeRV; HNeRV; MNeRV [2407.07347];</p>
+<p>LRConv-NeRV [2603.18261]; wavefront parallel decode [2607.19082];</p>
+<p>NeRV-Diffusion generative [2509.24353].</p>
+<a id="7-2-bitstream-p3"></a><h3>7.2 Bitstream (P3)</h3>
+<pre><code>model NALU (type=3):
+  arch_id u(8)           // selects decoder graph
+  embedding_dim u(16)
+  num_frames u(32)
+  precision_map (JOMP)
+  quantized_weights[]    // INT8/INT4 payload
+frame_index NALU (type=2):
+  for t in frames: embedding vector (quantized)</code></pre>
+<a id="7-3-progressive-scalable-decode"></a><h3>7.3 Progressive / scalable decode</h3>
+<pre><code>Decoder(k_layers):
+  for l in 0..k: frame_t += Layer_l(E_t)
+  quality Q_k increases monotonically with k
+  Tier-1 fallback: NONE (P3 needs NPU); if absent, skip P3, use P1.</code></pre>
+<a id="7-4-decode-speed"></a><h3>7.4 Decode speed</h3>
+<p>Parallel MLP: all frames decoded independently → 1000× faster than autoregressive NVC.</p>
+<p>&lt;1 MB model for 1080p30 short clip.</p>
+<p>---</p>
+<a id="8-paradigm-p4-semantic-task-oriented-vcm"></a><h2>8. Paradigm P4 — Semantic / Task-Oriented (VCM)</h2>
+<a id="8-1-scalable-human-machine"></a><h3>8.1 Scalable human+machine</h3>
+<pre><code>Base layer (P1): human-viewable, low bitrate, legacy HW decode.
+Semantic layer (P4): auxiliary tokens for machine tasks.
+  PAT-VCM plug-and-play tokens [2604.13294]:
+    token_stream = TokenEncoder( base_features, task_heads )
+    machine_task_output = TaskModel( base_features + tokens )
+  Multi-task JRD [2604.09421]:
+    optimize R for {human PSNR, task mAP, task F1} with visibility thresholds</code></pre>
+<p>Reference: Scalable human+machine [2208.02512]; VNVC [2306.10681];</p>
+<p>PAT-VCM [2604.13294]; MT-JRD [2604.09421]; task JRD [2607.19515];</p>
+<p>HPC volumetric [2407.09026]; event fusion [2607.28020].</p>
+<a id="8-2-bitstream-p4"></a><h3>8.2 Bitstream (P4)</h3>
+<pre><code>token NALU (type=4):
+  task_mask u(16)         // which tasks tokens support
+  token_dim u(16)
+  precision_map
+  quantized_tokens[]      // INT8</code></pre>
+<a id="8-3-machine-only-mode"></a><h3>8.3 Machine-only mode</h3>
+<p>If <code>task_mask</code> excludes human and base pixels not needed, decoder MAY reconstruct only</p>
+<p>feature maps (no pixel decode) → 70–90% bitrate vs HEVC for equal task accuracy.</p>
+<p>---</p>
+<a id="9-content-analyzer-normative-interface"></a><h2>9. Content Analyzer (normative interface)</h2>
+<pre><code>ContentAnalyzer (lightweight, runs encoder-side; decoder does NOT need it):
+  input:  segment (16-32 frames, downscaled to 256x256)
+  backbone: MobileNetV3-small (4.2M params, INT8)
+  heads:
+    scene_type     : {natural, screen, animation, volumetric, synthetic, lowlight}
+    motion_complex : {static, slow, fast, complex}
+    texture_rich   : {flat, textured, detailed, synthetic}
+    target_use     : {human, machine, both}
+    quality_pref   : {speed, balance, best}
+  latency: &lt;5 ms/segment on CPU
+  output: ContentProfile struct (§9.1)</code></pre>
+<a id="9-1-contentprofile-struct"></a><h3>9.1 ContentProfile struct</h3>
+<pre><code>struct ContentProfile {
+  uint8 scene_type;
+  uint8 motion_complex;
+  uint8 texture_rich;
+  uint8 target_use;
+  uint8 quality_pref;
+  float spatial_complex;     // 0..1
+  float temporal_complex;    // 0..1
+  float semantic_complex;    // 0..1
+};</code></pre>
+<p>---</p>
+<a id="10-paradigm-selector-normative-decision-matrix"></a><h2>10. Paradigm Selector (normative decision matrix)</h2>
+<pre><code>select_paradigms(profile, target_bitrate, target_quality,
+                 target_compute, target_tasks) -&gt; paradigm_set:
+
+  # Hard constraints first
+  if target_compute == REAL_TIME_HW:
+      return {P1}                      # only HW-decodable
+  if target_tasks != NONE and target_use == MACHINE:
+      base = {P1, P4}
+  else:
+      base = {P1}
+
+  # Content-driven augmentation
+  switch (profile.scene_type):
+    case NATURAL:
+      if profile.temporal_complex &gt; 0.6:
+          add P2                    # neural wins on high motion
+      else:
+          # P1 suffices
+    case SCREEN:
+      add P3 if target_compute &gt;= TIER2   # INR great for graphics
+    case ANIMATION:
+      add P3
+    case VOLUMETRIC:
+      add P3 (HPC variant)
+    case LOWLIGHT:
+      add P2 (event-fusion optional)
+    case SYNTHETIC:
+      add P3
+
+  # Ultra-low bitrate
+  if target_bitrate &lt; 0.1 bpp:
+      add P2 (discrete VQ variant [2607.02562])
+
+  # Progressive requested
+  if target_quality == PROGRESSIVE:
+      add P3
+
+  return base | augment</code></pre>
+<p>Decision table (summary, encoder-side reference):</p>
+<p>| Profile | Primary | Secondary | Bitrate |</p>
+<p>|---------|---------|-----------|---------|</p>
+<p>| Natural+HiMotion+Human | P2 | P1 | 1–10 Mbps |</p>
+<p>| Natural+LoMotion+Human | P1 | — | 0.5–5 Mbps |</p>
+<p>| Screen/Graphics | P1 | P3 | 0.1–2 Mbps |</p>
+<p>| Animation | P3 | P1 | 0.5–3 Mbps |</p>
+<p>| Volumetric/NeRF | P3(HPC) | — | 1–50 Mbps |</p>
+<p>| Low-light/Event | P2 | — | 0.5–5 Mbps |</p>
+<p>| Machine-only | P4 | P1 | 0.01–1 Mbps |</p>
+<p>| Human+Machine | P4 | P1/P2 | 0.5–10 Mbps |</p>
+<p>| Ultra-low (&lt;0.1bpp) | P2(dVQ) | P4 | 0.01–0.1 |</p>
+<p>| Realtime-HW | P1 | — | any |</p>
+<p>| Progressive | P3 | P4 | any |</p>
+<p>---</p>
+<a id="11-unified-rate-controller-normative-algorithm"></a><h2>11. Unified Rate Controller (normative algorithm)</h2>
+<pre><code>allocate(active_paradigms, target_bitrate, profile) -&gt; budget_map:
+
+  # 1. Cost models (learned offline, table lookup at runtime)
+  for p in active_paradigms:
+     cost[p] = LookupCostModel(p, profile)   # -&gt; {bits, psnr, msssim, time}
+
+  # 2. Lagrangian allocation per GOP
+  R_rem = target_bitrate
+  T_rem = target_compute_budget
+  for p in active_paradigms (priority order P1&gt;P4&gt;P2&gt;P3):
+     r_p = SolveSingleParadigmRate(R_rem, lambda, cost[p])
+     if time(p, r_p) &lt;= T_rem:
+        budget[p] = r_p
+        R_rem -= expected_bits(p, r_p)
+        T_rem -= time(p, r_p)
+     else:
+        budget[p] = 0   # drop layer if over compute
+
+  # 3. Feedback loop [2604.20104]
+  actual_bits = encode_and_measure()
+  if actual_bits &gt; target_bitrate * 1.05:
+     lambda *= 1.1; re-allocate (next GOP)
+  elif actual_bits &lt; target_bitrate * 0.95:
+     lambda *= 0.95; re-allocate</code></pre>
+<a id="11-1-quality-metrics"></a><h3>11.1 Quality metrics</h3>
+<p>| Target | Metric | Used in |</p>
+<p>|--------|--------|---------|</p>
+<p>| Human | VMAF, MS-SSIM, LPIPS, PSNR-HVS | P1/P2/P3 RDO |</p>
+<p>| Machine | mAP, F1, Top-1, cosine-sim | P4 JRD |</p>
+<p>| Generative | FVD, FID | NeRV-Diffusion |</p>
+<p>| Scalable | layer-wise RD | P3 progressive |</p>
+<p>---</p>
+<a id="12-quantization-specification-normative"></a><h2>12. Quantization Specification (normative)</h2>
+<a id="12-1-weight-quantization-all-neural-paradigms"></a><h3>12.1 Weight quantization (all neural paradigms)</h3>
+<pre><code>per-channel symmetric INT8:
+  scale_c = max(|W_c|) / 127
+  W_q = round(W_c / scale_c)              # clamp [-128,127]
+  store scale_c as INT16 fixed (Q1.15)
+per-channel INT4 (JOMP-selected layers):
+  scale_c = max(|W_c|) / 7
+  W_q = round(W_c / scale_c)              # clamp [-8,7]
+
+HAMP-LIC [2608.12239] for INR weight compression (mixed per-tensor).</code></pre>
+<a id="12-2-activation-quantization"></a><h3>12.2 Activation quantization</h3>
+<p>INT16 dynamic per-tensor (min/max tracked at runtime, sent in NALU header).</p>
+<a id="12-3-rounding"></a><h3>12.3 Rounding</h3>
+<p>Inference: round-half-to-even. Training: stochastic (Straight-Through Estimator).</p>
+<p>---</p>
+<a id="13-cross-platform-determinism-normative-critical"></a><h2>13. Cross-Platform Determinism (normative, CRITICAL)</h2>
+<p>A decoder at tier &gt;= required_tier, given the same bitstream and model hash, SHALL produce</p>
+<p><strong>bit-identical</strong> output across all conforming implementations.</p>
+<p>Enforcement:</p>
+<p>1. Fixed-point reference model (Python + C++ integer) in §17.</p>
+<p>2. Conformance vectors: 10 clips × 3 tiers, expected MD5 of decoded YUV.</p>
+<p>3. No <code>float</code>, <code>double</code>, or platform-intrinsics in decode math.</p>
+<p>4. rANS CDF tables and LUTs are part of the bitstream (no implementation freedom).</p>
+<p>5. Model hash (FNV-1a over quantized weights) MUST match <code>uvcC.model_hash</code>.</p>
+<p>6. Any non-determinism found in testing → implementation bug, not spec ambiguity.</p>
+<p>Reference: MLVC [2606.28027], Streamable NVC [2608.00483].</p>
+<p>---</p>
+<a id="14-reference-software-architecture"></a><h2>14. Reference Software Architecture</h2>
+<pre><code>uvc/
+  encoder/
+    analyzer.py            # ContentAnalyzer (MobileNetV3)
+    selector.py            # paradigm decision matrix
+    p1_vvc/                # wraps VVenC + Neural-ALF plugin
+    p2_nvc/                # DCVC-MB (PyTorch -&gt; ONNX -&gt; fixed-point)
+    p3_inr/                # MNeRV optimizer
+    p4_vcm/                # PAT-VCM token encoder
+    mux.py                 # ISOBMFF writer (ftyp, moov, uvcC, uvcm, mdat)
+    rate_ctrl.py           # unified allocator
+  decoder/
+    demux.py               # ISOBMFF parser, layer extractor
+    p1_vvc/                # VVC HW/SW decoder (libvvenc-decode)
+    p2_nvc_fixed/          # INTEGER-ONLY reference decoder (C++)
+    p3_inr_fixed/          # integer MLP decoder
+    p4_vcm/                # token -&gt; task features
+    negotiate.py           # tier + model-hash capability check
+  common/
+    rans.c/.h              # integer rANS
+    quant.c/.h             # INT8/INT4 dequant
+    bitstream.c/.h         # NALU reader/writer
+    conformance/           # test vectors + MD5
+  tools/
+    uvcconform.py          # runs conformance suite
+    bench.py               # RD + complexity benchmark</code></pre>
+<a id="14-1-build-toolchain-already-installed-on-this-machine"></a><h3>14.1 Build toolchain (already installed on this machine)</h3>
+<p>- GCC 16.1.0 (MinGW-w64, WinLibs) — verified compiling C++20.</p>
+<p>- Clang/LLVM 22.1.8 — verified.</p>
+<p>- CMake 4.0.1, Ninja 1.13.</p>
+<p>- Python 3.11 (uv-managed venvs).</p>
+<p>- Reference NVC in PyTorch 2.7 (CPU) for training/export; ONNX for inference.</p>
+<a id="14-2-build-commands"></a><h3>14.2 Build commands</h3>
+<pre><code>cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++ -DUVC_TIER=3
+cmake --build build</code></pre>
+<p>---</p>
+<a id="15-api-definition-c-abi-normative"></a><h2>15. API Definition (C ABI, normative)</h2>
+<pre><code>typedef struct UVCContentProfile {
+  uint8_t scene_type, motion_complex, texture_rich, target_use, quality_pref;
+  float   spatial_complex, temporal_complex, semantic_complex;
+} UVCContentProfile;
+
+typedef struct UVCDecoderConfig {
+  uint8_t tier;                 // 1,2,3
+  uint32_t held_model_hashes[8];
+  uint8_t  held_model_count;
+} UVCDecoderConfig;
+
+// Encoder
+uvc_encoder* uvc_encoder_create(const char* preset); // "realtime","quality","machine"
+void uvc_encoder_set_target(uvc_encoder*, float bitrate_mbps,
+                            UVCQualityMode mode, UVCTaskSet tasks);
+int  uvc_encoder_push(uvc_encoder*, const uint8_t* yuv, int w, int h,
+                      UVCContentProfile* prof);
+int  uvc_encoder_pull_packet(uvc_encoder*, uint8_t* out, int* size);
+
+// Decoder
+uvc_decoder* uvc_decoder_create(UVCDecoderConfig* cfg);
+int  uvc_decoder_push_packet(uvc_decoder*, const uint8_t* pkt, int size);
+// returns decoded YUV for the highest tier the config allows
+int  uvc_decoder_pull_frame(uvc_decoder*, uint8_t* yuv, int* w, int* h);
+// machine output (P4): returns feature tensor for requested task
+int  uvc_decoder_pull_task(uvc_decoder*, uint16_t task_id, float* feat, int* dim);</code></pre>
+<p>---</p>
+<a id="16-conformance-test-plan"></a><h2>16. Conformance &amp; Test Plan</h2>
+<pre><code>uvcconform.py:
+  for each clip in conformance_set:        # 10 clips, mixed content
+    for each tier in [1,2,3]:
+      decode -&gt; yuv
+      assert md5(yuv) == expected_md5[clip][tier]
+  for each NVC model:
+    assert fnv1a(weights) == bitstream.model_hash
+  report PASS/FAIL with first mismatch offset</code></pre>
+<p>Conformance clips (to be captured): <code>city_4k</code>, <code>screen_ui</code>, <code>anime_clip</code>, <code>nerf_spin</code>,</p>
+<p><code>lowlight_cam</code>, <code>surveil_1080p</code>, <code>talking_head</code>, <code>gaming_cap</code>, <code>medical_4k</code>, <code>synthetic_gen</code>.</p>
+<p>---</p>
+<a id="17-deployment-distribution"></a><h2>17. Deployment &amp; Distribution</h2>
+<a id="17-1-model-management"></a><h3>17.1 Model management</h3>
+<p>- Encoder (cloud): continuous training; semantic versioning MAJOR.MINOR.PATCH.</p>
+<p>- Decoder: base models shipped frozen with OS/app; delta updates via CDN (&lt;5 MB).</p>
+<p>- Capability negotiation via <code>uvcC</code>; missing model → decode base layer only.</p>
+<a id="17-2-hardware-co-design"></a><h3>17.2 Hardware co-design</h3>
+<p>- Tier-1: reuse existing VVC/HEVC/AV1 fixed-function decoders (no new silicon).</p>
+<p>- Tier-2: NPU runs P2/P3/P4 integer graphs (INT8/INT4).</p>
+<p>- Tier-3: GPU FP16 for generative INR + analytics.</p>
+<a id="17-3-standardization-path"></a><h3>17.3 Standardization path</h3>
+<p>1. Open-source reference (Apache-2.0) → prove gains.</p>
+<p>2. Submit to MPEG/VCEG as "Unified Multi-Paradigm Video Coding".</p>
+<p>3. IETF draft for <code>uvcC</code> / <code>uvc1</code> ISOBMFF brands.</p>
+<p>---</p>
+<a id="18-implementation-priority-first-12-weeks"></a><h2>18. Implementation Priority (first 12 weeks)</h2>
+<p>| Week | Task | Ref |</p>
+<p>|------|------|-----|</p>
+<p>| 1–2 | ContentAnalyzer + Selector (CPU) | §9,§10 |</p>
+<p>| 2–4 | P1: VVenC + Neural-ALF plugin | §4, [2402.08397] |</p>
+<p>| 4–6 | uvcC / uvcm / ISOBMFF mux+demux | §2,§3 |</p>
+<p>| 4–8 | P2: DCVC-MB → ONNX → fixed-point | §5, [2607.14305] |</p>
+<p>| 6–10 | Cross-platform determinism + conformance | §13, [2606.28027] |</p>
+<p>| 8–12 | P3: MNeRV progressive decoder | §7, [2407.07347] |</p>
+<p>| 10–12 | Unified rate controller + feedback | §11, [2604.20104] |</p>
+<p>| 12+ | P4: PAT-VCM tokens | §8, [2604.13294] |</p>
+<p>---</p>
+<a id="19-key-references-normative-citations"></a><h2>19. Key References (normative citations)</h2>
+<p>| Topic | Paper / ID |</p>
+<p>|-------|-----------|</p>
+<p>| Cross-platform NVC determinism | MLVC [2606.28027] |</p>
+<p>| DCVC-MB (Mamba B-frame) | [2607.14305] |</p>
+<p>| MNeRV (progressive INR) | [2407.07347] |</p>
+<p>| PAT-VCM (semantic tokens) | [2604.13294] |</p>
+<p>| Perceptual bit allocation | [2608.07799] |</p>
+<p>| JOMP mixed-precision | [2606.13110] |</p>
+<p>| HAMP-LIC weight quant | [2608.12239] |</p>
+<p>| Streamable NVC determinism | [2608.00483] |</p>
+<p>| Neural in-loop VVC filter | [2607.05737], [2607.12186] |</p>
+<p>| DLF survey | [2607.16319] |</p>
+<p>| Hybrid VVC+NN framework | [2402.08397] |</p>
+<p>| Scalable human+machine | [2208.02512] |</p>
+<p>| VNVC | [2306.10681] |</p>
+<p>| HPC volumetric | [2407.09026] |</p>
+<p>| Event-camera fusion | [2607.28020] |</p>
+<p>| Feedback rate control | [2604.20104] |</p>
+<p>| Ultra-low bitrate dVQ | [2607.02562] |</p>
+<p>| NeRV-Diffusion | [2509.24353] |</p>
+<p>| LRConv-NeRV | [2603.18261] |</p>
+<p>| Multi-task JRD | [2604.09421] |</p>
+<p>| Entropy-conserving binarization | [2606.23753] |</p>
+<p>---</p>
+<a id="20-open-questions-research-backlog"></a><h2>20. Open Questions (research backlog)</h2>
+<p>1. Universal motion field spanning P1/P2/P3/P4.</p>
+<p>2. Joint RD-Task Lagrangian for multiple simultaneous machine tasks.</p>
+<p>3. Seamless mid-stream paradigm switching without artifacts.</p>
+<p>4. Pixel-vs-generative boundary for NeRV-Diffusion storage.</p>
+<p>5. Privacy-preserving encrypted semantic tokens.</p>
+<p>6. Neural scaling laws to predict RD/complexity without encoding.</p>
+<p>---</p>
+<p>*End of specification. Implementers SHOULD begin with §14 (toolchain already present),</p>
+<p>§2/§3 (container), and §9/§10 (analyzer + selector) to produce a minimal viable encoder</p>
+<p>that emits a Tier-1-decodable P1 base layer, then layer P2/P3/P4 incrementally.*</p>
+
+  <li><a href="#universal-video-codec-uvc-implementation-specification">Universal Video Codec (UVC) — Implementation Specification</a></li>
+  <li><a href="#0-scope-and-introduction">0. Scope and Introduction</a></li>
+  <li><a href="#1-normative-conformance-levels-decoder-tiers">1. Normative Conformance Levels (Decoder Tiers)</a></li>
+  <li><a href="#2-bitstream-container-isobmff">2. Bitstream Container (ISOBMFF)</a></li>
+  <li><a href="#2-1-box-tree">2.1 Box tree</a></li>
+  <li><a href="#2-2-uvce-enhancement-sample-entry-stsd-child">2.2 `uvcE` enhancement sample entry (stsd child)</a></li>
+  <li><a href="#2-3-uvcc-configuration-box">2.3 `uvcC` configuration box</a></li>
+  <li><a href="#3-sample-nalu-structure">3. Sample / NALU Structure</a></li>
+  <li><a href="#3-1-picture-timing-model">3.1 Picture timing model</a></li>
+  <li><a href="#3-2-uvc-nalu-header-p2-p3-p4-payloads">3.2 UVC NALU header (P2/P3/P4 payloads)</a></li>
+  <li><a href="#3-3-layer-dependency-rule">3.3 Layer dependency rule</a></li>
+  <li><a href="#4-paradigm-p1-traditional-enhanced-vvc-base">4. Paradigm P1 — Traditional++ (Enhanced VVC base)</a></li>
+  <li><a href="#4-1-encoder-pipeline-normative-block-order">4.1 Encoder pipeline (normative block order)</a></li>
+  <li><a href="#4-2-neural-in-loop-filter-neural-alf">4.2 Neural in-loop filter (Neural-ALF)</a></li>
+  <li><a href="#4-3-perceptual-bit-allocation">4.3 Perceptual bit allocation</a></li>
+  <li><a href="#4-4-nn-guided-ctu-split-optional-encoder-only">4.4 NN-guided CTU split (optional, encoder-only)</a></li>
+  <li><a href="#4-5-quantization">4.5 Quantization</a></li>
+  <li><a href="#4-6-determinism">4.6 Determinism</a></li>
+  <li><a href="#5-paradigm-p2-neural-residual-conditional-nvc">5. Paradigm P2 — Neural Residual (Conditional NVC)</a></li>
+  <li><a href="#5-1-encoder-architecture-dcvc-mb-family">5.1 Encoder architecture (DCVC-MB family)</a></li>
+  <li><a href="#5-2-cross-platform-deterministic-quantization-normative">5.2 Cross-platform deterministic quantization (NORMATIVE)</a></li>
+  <li><a href="#5-3-quantization-schedule-jomp">5.3 Quantization schedule (JOMP)</a></li>
+  <li><a href="#5-4-decode-tier-2">5.4 Decode (Tier 2)</a></li>
+  <li><a href="#5-5-complexity-budget">5.5 Complexity budget</a></li>
+  <li><a href="#6-entropy-coding-normative">6. Entropy Coding (normative)</a></li>
+  <li><a href="#6-1-p1-cabac">6.1 P1: CABAC</a></li>
+  <li><a href="#6-2-p2-p3-p4-rans-range-asymmetric-numeral-system">6.2 P2/P3/P4: rANS (range asymmetric numeral system)</a></li>
+  <li><a href="#6-3-p4-semantic-tokens-variable-length-rans">6.3 P4 semantic tokens: variable-length + rANS</a></li>
+  <li><a href="#7-paradigm-p3-implicit-neural-representation-inr">7. Paradigm P3 — Implicit Neural Representation (INR)</a></li>
+  <li><a href="#7-1-encoder-mnerv-family-per-video-overfit">7.1 Encoder (MNeRV family, per-video overfit)</a></li>
+  <li><a href="#7-2-bitstream-p3">7.2 Bitstream (P3)</a></li>
+  <li><a href="#7-3-progressive-scalable-decode">7.3 Progressive / scalable decode</a></li>
+  <li><a href="#7-4-decode-speed">7.4 Decode speed</a></li>
+  <li><a href="#8-paradigm-p4-semantic-task-oriented-vcm">8. Paradigm P4 — Semantic / Task-Oriented (VCM)</a></li>
+  <li><a href="#8-1-scalable-human-machine">8.1 Scalable human+machine</a></li>
+  <li><a href="#8-2-bitstream-p4">8.2 Bitstream (P4)</a></li>
+  <li><a href="#8-3-machine-only-mode">8.3 Machine-only mode</a></li>
+  <li><a href="#9-content-analyzer-normative-interface">9. Content Analyzer (normative interface)</a></li>
+  <li><a href="#9-1-contentprofile-struct">9.1 ContentProfile struct</a></li>
+  <li><a href="#10-paradigm-selector-normative-decision-matrix">10. Paradigm Selector (normative decision matrix)</a></li>
+  <li><a href="#11-unified-rate-controller-normative-algorithm">11. Unified Rate Controller (normative algorithm)</a></li>
+  <li><a href="#11-1-quality-metrics">11.1 Quality metrics</a></li>
+  <li><a href="#12-quantization-specification-normative">12. Quantization Specification (normative)</a></li>
+  <li><a href="#12-1-weight-quantization-all-neural-paradigms">12.1 Weight quantization (all neural paradigms)</a></li>
+  <li><a href="#12-2-activation-quantization">12.2 Activation quantization</a></li>
+  <li><a href="#12-3-rounding">12.3 Rounding</a></li>
+  <li><a href="#13-cross-platform-determinism-normative-critical">13. Cross-Platform Determinism (normative, CRITICAL)</a></li>
+  <li><a href="#14-reference-software-architecture">14. Reference Software Architecture</a></li>
+  <li><a href="#14-1-build-toolchain-already-installed-on-this-machine">14.1 Build toolchain (already installed on this machine)</a></li>
+  <li><a href="#14-2-build-commands">14.2 Build commands</a></li>
+  <li><a href="#15-api-definition-c-abi-normative">15. API Definition (C ABI, normative)</a></li>
+  <li><a href="#16-conformance-test-plan">16. Conformance &amp; Test Plan</a></li>
+  <li><a href="#17-deployment-distribution">17. Deployment &amp; Distribution</a></li>
+  <li><a href="#17-1-model-management">17.1 Model management</a></li>
+  <li><a href="#17-2-hardware-co-design">17.2 Hardware co-design</a></li>
+  <li><a href="#17-3-standardization-path">17.3 Standardization path</a></li>
+  <li><a href="#18-implementation-priority-first-12-weeks">18. Implementation Priority (first 12 weeks)</a></li>
+  <li><a href="#19-key-references-normative-citations">19. Key References (normative citations)</a></li>
+  <li><a href="#20-open-questions-research-backlog">20. Open Questions (research backlog)</a></li>
+</ul></nav>
+
+<hr>
+<p><em>Generated from <code>UVC_Specification.md</code> by <code>tools/spec_to_html.py</code>.
+This document is the Tier-1 reference scaffold specification.</em></p>
+</body>
+</html>
