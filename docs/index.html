@@ -547,6 +547,25 @@ int  uvc_decoder_pull_task(uvc_decoder*, uint16_t task_id, float* feat, int* dim
 <p>*End of specification. Implementers SHOULD begin with §14 (toolchain already present),</p>
 <p>§2/§3 (container), and §9/§10 (analyzer + selector) to produce a minimal viable encoder</p>
 <p>that emits a Tier-1-decodable P1 base layer, then layer P2/P3/P4 incrementally.*</p>
+<p>---</p>
+<a id="21-reference-scaffold-status-companion-c-code"></a><h2>21. Reference Scaffold Status (companion C code)</h2>
+<p>The companion <code>C11</code> reference scaffold (this repo) currently implements the</p>
+<p><strong>verifiable core</strong> of the design; the neural paradigms (P2–P4) and the ISOBMFF</p>
+<p>container are intentionally stubbed pending the roadmap in issue #1.</p>
+<p>| Component | Status in scaffold | Notes |</p>
+<p>|-----------|--------------------|-------|</p>
+<p>| Entropy coder (<code>common/rans.<em></code>) | Substitution | Spec §6.2 mandates integer rANS; the scaffold ships a <strong>canonical Huffman</strong> coder behind the same <code>rans_</em></code> API for verifiability. The normative rANS is a drop-in replacement. |</p>
+<p>| Quantizer (<code>common/quant.h</code>) | Implemented | Fixed INT8/INT4; integer-only, <code>uint16</code> Q1.15 scale (real_scale &lt; 2). |</p>
+<p>| Bitstream (<code>common/bitstream.*</code>) | Implemented | MSB-first writer/reader; 64-bit accumulator. |</p>
+<p>| Analyzer (<code>encoder/analyzer.*</code>) | Implemented | Integer Q8.8 heuristic, no float. |</p>
+<p>| Selector (<code>encoder/selector.*</code>) | Implemented | Q8.8 decision matrix. |</p>
+<p>| <strong>P1 pipeline</strong> (<code>encoder/p1.<em></code>, <code>decoder/p1.</em></code>) | <strong>Implemented (round-trip)</strong> | Integer 8×8 DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy (nibble alphabet) → IDCT. Self-test proves bit-exact reconstruction when the signal fits int8. |</p>
+<p>| Tier negotiation (<code>decoder/negotiate.*</code>) | Implemented | Stub tier map (LEGACY/ENHANCED/FULL). |</p>
+<p>| P2 / P3 / P4 | Stub | Roadmap issue #1. |</p>
+<p>| ISOBMFF container / mux | Stub | Roadmap issue #1. |</p>
+<p>Self-tests (<code>tools/uvctest.c</code>) cover rANS round-trip + determinism, quant</p>
+<p>round-trip, bitstream round-trip, analyzer+selector, tier negotiation, and the</p>
+<p><strong>P1 block-transform pipeline</strong> end-to-end. Run <code>ctest</code> (or <code>uvctest</code> directly).</p>
 
   <li><a href="#universal-video-codec-uvc-implementation-specification">Universal Video Codec (UVC) — Implementation Specification</a></li>
   <li><a href="#0-scope-and-introduction">0. Scope and Introduction</a></li>
@@ -607,6 +626,7 @@ int  uvc_decoder_pull_task(uvc_decoder*, uint16_t task_id, float* feat, int* dim
   <li><a href="#18-implementation-priority-first-12-weeks">18. Implementation Priority (first 12 weeks)</a></li>
   <li><a href="#19-key-references-normative-citations">19. Key References (normative citations)</a></li>
   <li><a href="#20-open-questions-research-backlog">20. Open Questions (research backlog)</a></li>
+  <li><a href="#21-reference-scaffold-status-companion-c-code">21. Reference Scaffold Status (companion C code)</a></li>
 </ul></nav>
 
 <hr>

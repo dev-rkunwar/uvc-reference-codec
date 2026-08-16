@@ -724,3 +724,27 @@ Conformance clips (to be captured): `city_4k`, `screen_ui`, `anime_clip`, `nerf_
 *End of specification. Implementers SHOULD begin with §14 (toolchain already present),
 §2/§3 (container), and §9/§10 (analyzer + selector) to produce a minimal viable encoder
 that emits a Tier-1-decodable P1 base layer, then layer P2/P3/P4 incrementally.*
+
+---
+
+## 21. Reference Scaffold Status (companion C code)
+
+The companion `C11` reference scaffold (this repo) currently implements the
+**verifiable core** of the design; the neural paradigms (P2–P4) and the ISOBMFF
+container are intentionally stubbed pending the roadmap in issue #1.
+
+| Component | Status in scaffold | Notes |
+|-----------|--------------------|-------|
+| Entropy coder (`common/rans.*`) | Substitution | Spec §6.2 mandates integer rANS; the scaffold ships a **canonical Huffman** coder behind the same `rans_*` API for verifiability. The normative rANS is a drop-in replacement. |
+| Quantizer (`common/quant.h`) | Implemented | Fixed INT8/INT4; integer-only, `uint16` Q1.15 scale (real_scale < 2). |
+| Bitstream (`common/bitstream.*`) | Implemented | MSB-first writer/reader; 64-bit accumulator. |
+| Analyzer (`encoder/analyzer.*`) | Implemented | Integer Q8.8 heuristic, no float. |
+| Selector (`encoder/selector.*`) | Implemented | Q8.8 decision matrix. |
+| **P1 pipeline** (`encoder/p1.*`, `decoder/p1.*`) | **Implemented (round-trip)** | Integer 8×8 DCT (fixed-point Q13, orthonormal, adjoint ≤ 1 LSB) → INT8 quant → entropy (nibble alphabet) → IDCT. Self-test proves bit-exact reconstruction when the signal fits int8. |
+| Tier negotiation (`decoder/negotiate.*`) | Implemented | Stub tier map (LEGACY/ENHANCED/FULL). |
+| P2 / P3 / P4 | Stub | Roadmap issue #1. |
+| ISOBMFF container / mux | Stub | Roadmap issue #1. |
+
+Self-tests (`tools/uvctest.c`) cover rANS round-trip + determinism, quant
+round-trip, bitstream round-trip, analyzer+selector, tier negotiation, and the
+**P1 block-transform pipeline** end-to-end. Run `ctest` (or `uvctest` directly).
