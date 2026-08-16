@@ -554,7 +554,7 @@ int  uvc_decoder_pull_task(uvc_decoder*, uint16_t task_id, float* feat, int* dim
 <p>container are intentionally stubbed pending the roadmap in issue #1.</p>
 <p>| Component | Status in scaffold | Notes |</p>
 <p>|-----------|--------------------|-------|</p>
-<p>| Entropy coder (<code>common/rans.<em></code>) | Substitution | Spec §6.2 mandates integer rANS; the scaffold ships a <strong>canonical Huffman</strong> coder behind the same <code>rans_</em></code> API for verifiability. The normative rANS is a drop-in replacement. |</p>
+<p>| Entropy coder (<code>common/rans.<em></code>) | <strong>Implemented (verified)</strong> | Integer rANS port of Fabian Giesen's rans64.h (64-bit state, word-based renorm, L=2^31) — no per-symbol frequency constraint, correct for ANY distribution. Little-endian 32-bit words for cross-platform determinism. Verified by <code>test_rans</code> + full P1 pipeline round-trip (MAE=0). |</p>
 <p>| Quantizer (<code>common/quant.h</code>) | Implemented | Fixed INT8/INT4; integer-only, <code>uint16</code> Q1.15 scale (real_scale &lt; 2). |</p>
 <p>| Bitstream (<code>common/bitstream.*</code>) | Implemented | MSB-first writer/reader; 64-bit accumulator. |</p>
 <p>| Analyzer (<code>encoder/analyzer.*</code>) | Implemented | Integer Q8.8 heuristic, no float. |</p>
